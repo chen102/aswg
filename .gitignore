@@ -21,3 +21,6 @@ output/
 *.pem
 *.p12
 *.pfx
+
+# Local tooling binary
+plink.exe
