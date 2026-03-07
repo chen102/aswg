@@ -1,0 +1,5 @@
+﻿{"type":"thread.started","thread_id":"SESSION_ID_PLACEHOLDER"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"示例输出"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"示例输出"}}
+{"type":"turn.completed","usage":{"input_tokens":1234,"cached_input_tokens":567,"output_tokens":89}}

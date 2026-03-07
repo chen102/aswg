@@ -1,0 +1,47 @@
+﻿<mxfile host="app.diagrams.net" modified="2026-03-07T00:00:00.000Z" agent="codex" version="26.0.11">
+  <diagram id="architecture" name="架构图">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1080" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="2" value="手机/桌面浏览器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" vertex="1" parent="1"><mxGeometry x="40" y="220" width="170" height="60" as="geometry"/></mxCell>
+        <mxCell id="3" value="Web 前端" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" vertex="1" parent="1"><mxGeometry x="250" y="220" width="150" height="60" as="geometry"/></mxCell>
+        <mxCell id="4" value="Go 网关服务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" vertex="1" parent="1"><mxGeometry x="450" y="220" width="170" height="60" as="geometry"/></mxCell>
+
+        <mxCell id="5" value="统一 API 层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1"><mxGeometry x="690" y="60" width="180" height="50" as="geometry"/></mxCell>
+        <mxCell id="6" value="适配器注册中心" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1"><mxGeometry x="690" y="140" width="180" height="50" as="geometry"/></mxCell>
+        <mxCell id="7" value="事件标准化层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1"><mxGeometry x="690" y="220" width="180" height="50" as="geometry"/></mxCell>
+        <mxCell id="8" value="鉴权与限流" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1"><mxGeometry x="690" y="300" width="180" height="50" as="geometry"/></mxCell>
+
+        <mxCell id="9" value="WebSocket 事件分发" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1"><mxGeometry x="930" y="40" width="190" height="55" as="geometry"/></mxCell>
+        <mxCell id="10" value="Codex Adapter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1"><mxGeometry x="930" y="140" width="160" height="50" as="geometry"/></mxCell>
+        <mxCell id="11" value="Agent Adapter B" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1"><mxGeometry x="930" y="220" width="160" height="50" as="geometry"/></mxCell>
+        <mxCell id="12" value="Agent Adapter C" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1"><mxGeometry x="930" y="300" width="160" height="50" as="geometry"/></mxCell>
+
+        <mxCell id="13" value="Codex CLI 与会话存储" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1"><mxGeometry x="1160" y="140" width="220" height="50" as="geometry"/></mxCell>
+        <mxCell id="14" value="其他 Agent CLI 与会话存储" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1"><mxGeometry x="1160" y="220" width="220" height="50" as="geometry"/></mxCell>
+        <mxCell id="15" value="其他 Agent CLI 与会话存储" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1"><mxGeometry x="1160" y="300" width="220" height="50" as="geometry"/></mxCell>
+
+        <mxCell id="e1" value="HTTP/WS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="2" target="3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" value="API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="3" target="4"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.2;entryX=0.5;entryY=1;" edge="1" parent="1" source="4" target="5"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="640" y="125"/><mxPoint x="780" y="125"/></Array></mxGeometry></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.2;entryX=0;entryY=0.5;" edge="1" parent="1" source="4" target="6"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="640" y="165"/></Array></mxGeometry></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="4" target="7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.8;entryX=0.5;entryY=0;" edge="1" parent="1" source="4" target="8"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="640" y="268"/><mxPoint x="640" y="280"/><mxPoint x="780" y="280"/></Array></mxGeometry></mxCell>
+
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="6" target="10"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.6;entryX=0;entryY=0.5;" edge="1" parent="1" source="6" target="11"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="880" y="245"/></Array></mxGeometry></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.8;entryX=0;entryY=0.5;" edge="1" parent="1" source="6" target="12"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="880" y="325"/></Array></mxGeometry></mxCell>
+
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="10" target="13"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="11" target="14"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="12" target="15"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0.5;entryY=1;" edge="1" parent="1" source="7" target="9"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="900" y="245"/><mxPoint x="900" y="95"/><mxPoint x="1025" y="95"/></Array></mxGeometry></mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" edge="1" parent="1" source="9" target="2"><mxGeometry relative="1" as="geometry"/></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

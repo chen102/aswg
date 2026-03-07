@@ -1,0 +1,23 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Dependencies
+node_modules/
+
+# Build/output
+dist/
+build/
+coverage/
+output/
+
+# Logs
+*.log
+
+# Local secrets / machine-specific files
+*.key
+*.keys
+*.pem
+*.p12
+*.pfx
