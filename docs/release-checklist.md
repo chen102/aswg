@@ -27,11 +27,11 @@
 
 | ID | 检查项 | Owner | 结果 | 证据 |
 | --- | --- | --- | --- | --- |
-| RC-05 | 所有 `S0/S1` 缺陷清零 | Dev Owner | [ ] |  |
-| RC-06 | MVP 核心 E2E 全部通过 | QA Owner | [ ] |  |
-| RC-07 | 适配器一致性测试通过 | QA Owner | [ ] |  |
-| RC-08 | 配置样例与实际部署参数一致 | Ops Owner | [ ] |  |
-| RC-09 | 回滚演练完成并可复现 | Ops Owner | [ ] |  |
+| RC-05 | 所有 `S0/S1` 缺陷清零 | Dev Owner | [x] | `docs/qa-report-mvp-2026-03-08-v3.md`（第 8 节：S0/S1=0） |
+| RC-06 | MVP 核心 E2E 全部通过 | QA Owner | [x] | `docs/qa-report-mvp-2026-03-08-v3.md`（含 E2E-01~10 与 E2E-02 N/A 说明） |
+| RC-07 | 适配器一致性测试通过 | QA Owner | [x] | `docs/qa-report-mvp-2026-03-08-v3.md`（含 ACT-01~17 与 ACT-13 N/A 双签） |
+| RC-08 | 配置样例与实际部署参数一致 | Ops Owner | [ ] | `docs/dev-release-prep-p0-08.md`（第 1 节，待 QA/Ops 复核） |
+| RC-09 | 回滚演练完成并可复现 | Ops Owner | [ ] | `docs/dev-release-prep-p0-08.md`（第 2 节，待 QA/Ops 复核） |
 
 ## 5. T（日）发布执行
 

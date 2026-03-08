@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Session Web Gateway</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="background-grid" aria-hidden="true"></div>
+    <main class="layout">
+      <header class="hero">
+        <h1>Agent Session Web Gateway</h1>
+        <p>统一会话视图 · Codex Adapter MVP</p>
+      </header>
+
+      <section class="panel" id="settings-panel">
+        <div class="panel-title-row">
+          <h2>连接设置</h2>
+          <p id="settings-status" class="status-text">等待配置</p>
+        </div>
+        <form id="settings-form" class="settings-grid">
+          <label>
+            <span>api_base_url</span>
+            <input id="api-base-url" type="url" required placeholder="http://127.0.0.1:8080" />
+          </label>
+          <label>
+            <span>ws_base_url</span>
+            <input id="ws-base-url" type="url" required placeholder="ws://127.0.0.1:8080" />
+          </label>
+          <label>
+            <span>default_adapter</span>
+            <input id="default-adapter" type="text" required placeholder="codex" />
+          </label>
+          <div class="action-row">
+            <button type="submit" class="btn">保存配置</button>
+            <button type="button" id="test-connection" class="btn btn-outline">连接测试</button>
+            <button type="button" id="reset-defaults" class="btn btn-ghost">恢复默认</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel panel-sessions">
+        <div class="panel-title-row">
+          <h2>会话</h2>
+          <div class="session-actions">
+            <label>
+              <span>Adapter</span>
+              <select id="adapter-select"></select>
+            </label>
+            <button id="reload-sessions" class="btn btn-outline" type="button">刷新列表</button>
+          </div>
+        </div>
+
+        <div class="session-body">
+          <aside>
+            <form id="create-session-form" class="create-session-form">
+              <h3>新建会话</h3>
+              <input id="create-session-title" type="text" placeholder="title（可选）" />
+              <input id="create-session-workspace" type="text" placeholder="workspace（可选）" />
+              <textarea id="create-session-seed" rows="2" placeholder="seed_prompt（可选）"></textarea>
+              <button type="submit" class="btn">创建并进入</button>
+              <p id="create-session-status" class="status-text">等待创建</p>
+            </form>
+            <ul id="session-list" class="session-list"></ul>
+          </aside>
+
+          <article class="session-detail">
+            <h3 id="session-title">未选择会话</h3>
+            <p id="session-meta" class="meta-line">请选择左侧会话</p>
+            <div class="stream-row">
+              <p id="stream-status" class="status-text">WS 未连接</p>
+              <button id="reconnect-stream" type="button" class="btn btn-ghost">重连流</button>
+            </div>
+            <section id="chat-thread" class="chat-thread" aria-live="polite"></section>
+
+            <form id="continue-form" class="continue-form">
+              <textarea id="continue-prompt" rows="3" required placeholder="输入继续会话的提示词"></textarea>
+              <div class="continue-actions">
+                <button id="continue-submit" type="submit" class="btn">Continue</button>
+              </div>
+            </form>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

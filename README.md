@@ -44,7 +44,35 @@
 2. `ws_base_url`，示例：`ws://127.0.0.1:8080`
 3. `default_adapter`，示例：`codex`
 
-建议通过 `public/runtime-config.json` + `localStorage` 覆盖的方式实现，避免每次变更都重新构建前端。
+建议通过 `frontend/src/runtime-config.json` + `localStorage` 覆盖的方式实现，避免每次变更都重新构建前端。
+
+## 快速启动（MVP）
+1. 启动服务：
+```bash
+cd backend
+go run ./cmd/server
+```
+2. 打开浏览器访问：
+`http://127.0.0.1:8080`
+3. 最小联调链路：
+- 设置页点击“连接测试”
+- 会话列表选择 `codex` 会话
+- 输入 prompt 执行 `continue`
+- 观察时间线和 WebSocket 实时更新
+
+可选环境变量：
+1. `SERVER_HOST`（默认 `127.0.0.1`）
+2. `SERVER_PORT`（默认 `8080`）
+3. `AUTH_TOKEN`（为空时不强制鉴权）
+4. `ENABLED_ADAPTERS`（默认 `codex`）
+5. `DEFAULT_ADAPTER`（默认 `codex`）
+6. `CODEX_SEED_FILE`（默认 `docs/resume-smoke.jsonl`）
+7. `FRONTEND_DIR`（默认 `frontend/src`）
+8. `CODEX_STREAM_MODE`（`real|mock`，默认 `real`）
+9. `CODEX_CLI_BIN`（默认 `codex`）
+10. `CODEX_CLI_ARGS`（默认 `exec --json --dangerously-bypass-approvals-and-sandbox`）
+11. `CODEX_CLI_TIMEOUT_MS`（默认 `90000`）
+12. `CODEX_MOCK_FALLBACK`（默认 `false`）
 
 ## 图文档约定（Drawio）
 1. `docs/diagrams/*.drawio` 保存源文件。
@@ -58,13 +86,15 @@ Windows 也可使用：
 5. 推荐按 `docs/workflows/drawio-doc-workflow.md` 执行完整图文发布流程。
 
 ## 状态
-当前仓库处于准备阶段，已完成：
-1. 多 Agent 架构文档。
-2. 开源规范约束。
-3. 前端可配置后端地址端口的方案设计。
-4. 发布、测试、运维文档基线补齐。
+当前仓库已完成 MVP 主链路实现，并具备真实 Codex CLI 流式桥接：
+1. Go 后端统一 API（health/adapters/sessions/detail/events/continue）。
+2. Adapter Registry 与 Codex Adapter 参考实现。
+3. WebSocket 流式事件推送（event/heartbeat/done）。
+4. 前端设置页与连接测试能力。
+5. 前端最小闭环：列表 -> 详情 -> continue -> 流式更新。
+6. Codex continue 默认走 `real` 模式（`codex exec --json`），本地可按需启用 mock fallback。
 
 ## 下一步
-1. 实现 Go 后端统一接口与 Adapter Registry。
-2. 落地 Codex Adapter 作为第一实现。
-3. 实现前端设置页和连接测试能力。
+1. 补齐 Go 单元测试与适配器一致性测试自动化。
+2. 增加真实流式路径的观测与告警（超时、退出码、重试策略）。
+3. 执行 QA 计划并输出发布 Go/No-Go 结论。

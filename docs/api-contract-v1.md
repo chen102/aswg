@@ -19,6 +19,7 @@
 
 ### 2.2 鉴权
 1. 默认所有接口需要 `Authorization: Bearer <token>`。
+   - 本地开发可将 `AUTH_TOKEN` 留空以关闭鉴权（仅建议本地/受控环境）。
 2. `GET /api/v1/health` 可匿名访问。
 3. WebSocket 鉴权支持两种方式：
    - 非浏览器客户端：`Authorization` Header。
@@ -71,7 +72,7 @@
   "display_name": "Codex",
   "enabled": true,
   "default": true,
-  "capabilities": ["discover_sessions", "events", "continue"],
+  "capabilities": ["create_session", "discover_sessions", "events", "continue"],
   "version": "0.1.0"
 }
 ```
@@ -124,6 +125,10 @@
 }
 ```
 
+字段说明：
+1. `normalized.role`：至少支持 `user`、`assistant`。
+2. `continue` 成功后，事件序列建议为：`user message` -> `assistant delta...` -> `assistant done`。
+
 ### 3.5 PagedResult
 ```json
 {
@@ -156,6 +161,20 @@
 }
 ```
 
+### 3.8 CreateSessionRequest
+```json
+{
+  "title": "MVP 新会话",
+  "workspace": "/workspace/project",
+  "seed_prompt": "请先总结当前任务目标"
+}
+```
+
+字段约束：
+1. `title`：可选，长度 `<= 200`。
+2. `workspace`：可选，长度 `<= 2000`。
+3. `seed_prompt`：可选，长度 `<= 8000`。
+
 ## 4. REST 接口定义
 
 ### 4.1 GET /api/v1/health
@@ -187,14 +206,28 @@
       "display_name": "Codex",
       "enabled": true,
       "default": true,
-      "capabilities": ["discover_sessions", "events", "continue"],
+      "capabilities": ["create_session", "discover_sessions", "events", "continue"],
       "version": "0.1.0"
     }
   ]
 }
 ```
 
-### 4.3 GET /api/v1/adapters/{adapter}/sessions
+### 4.3 POST /api/v1/adapters/{adapter}/sessions
+用途：创建新会话。  
+鉴权：必需。
+
+请求体：`CreateSessionRequest`（所有字段可选）。
+
+成功响应：
+1. HTTP `201 Created`。
+2. 响应 `data`：`SessionDetail`。
+
+失败语义：
+1. 参数错误返回 `4001`。
+2. 适配器不存在返回 `4002`。
+
+### 4.4 GET /api/v1/adapters/{adapter}/sessions
 用途：按适配器查询会话列表。  
 鉴权：必需。
 
@@ -226,13 +259,13 @@ Query 参数：
 }
 ```
 
-### 4.4 GET /api/v1/adapters/{adapter}/sessions/{id}
+### 4.5 GET /api/v1/adapters/{adapter}/sessions/{id}
 用途：查询会话详情（基础信息，不含完整事件流）。  
 鉴权：必需。
 
 响应 `data`：`SessionDetail`。
 
-### 4.5 GET /api/v1/adapters/{adapter}/sessions/{id}/events
+### 4.6 GET /api/v1/adapters/{adapter}/sessions/{id}/events
 用途：分页读取会话历史事件。  
 鉴权：必需。
 
@@ -259,7 +292,7 @@ Query 参数：
 }
 ```
 
-### 4.6 POST /api/v1/adapters/{adapter}/sessions/{id}/continue
+### 4.7 POST /api/v1/adapters/{adapter}/sessions/{id}/continue
 用途：在指定会话继续提问并启动流式事件。  
 鉴权：必需。
 
@@ -276,6 +309,8 @@ Header：
 1. 参数错误返回 `4001`。
 2. 会话不存在返回 `4003`。
 3. 任务无法启动返回 `4004` 或 `5000`。
+4. 成功后应至少产出一条 `normalized.role=user` 的消息事件，再输出 assistant 流式事件。
+5. 若运行期失败（例如 CLI 超时），应输出 `message.done`，并在 `payload.raw_type=assistant_error` 中携带错误文本。
 
 ## 5. WebSocket 契约
 
@@ -341,6 +376,7 @@ Header：
 
 ## 8. 联调最小清单
 1. `health`、`adapters`、`sessions`、`session detail`、`events`、`continue` 六条 REST 路径可用。
-2. WebSocket 能稳定收到 `event` + `heartbeat` + `done`。
-3. 断网重连后可通过 `last_seq` 续传且不乱序。
-4. 所有错误响应都包含 `request_id`。
+2. `create session` 路径可用：`POST /api/v1/adapters/{adapter}/sessions`。
+3. WebSocket 能稳定收到 `event` + `heartbeat` + `done`。
+4. 断网重连后可通过 `last_seq` 续传且不乱序。
+5. 所有错误响应都包含 `request_id`。

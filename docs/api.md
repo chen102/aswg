@@ -7,6 +7,7 @@
 ## 1. 统一约定
 1. 基础路径：`/api/v1`
 2. 鉴权：Header `Authorization: Bearer <token>`
+   - 说明：若服务端未配置 `AUTH_TOKEN`（本地开发模式），则鉴权可被关闭。
 3. 返回格式：
 ```json
 {
@@ -21,16 +22,28 @@
 - 说明：获取可用适配器列表。
 
 ## 3. 会话接口
-1. `GET /api/v1/adapters/{adapter}/sessions`
+1. `POST /api/v1/adapters/{adapter}/sessions`
+- 说明：创建新会话。
+- 请求体（字段均可选）：
+```json
+{
+  "title": "可选，会话标题",
+  "workspace": "可选，工作目录",
+  "seed_prompt": "可选，初始化提示词"
+}
+```
+- 成功返回：HTTP `201` + `SessionDetail`
+
+2. `GET /api/v1/adapters/{adapter}/sessions`
 - 说明：查询会话列表。
 
-2. `GET /api/v1/adapters/{adapter}/sessions/{id}`
+3. `GET /api/v1/adapters/{adapter}/sessions/{id}`
 - 说明：获取会话详情。
 
-3. `GET /api/v1/adapters/{adapter}/sessions/{id}/events`
+4. `GET /api/v1/adapters/{adapter}/sessions/{id}/events`
 - 说明：分页读取历史事件。
 
-4. `POST /api/v1/adapters/{adapter}/sessions/{id}/continue`
+5. `POST /api/v1/adapters/{adapter}/sessions/{id}/continue`
 - 说明：在指定会话继续提问。
 - 请求体：
 ```json
@@ -39,6 +52,10 @@
   "cwd": "可选"
 }
 ```
+- 事件语义：continue 触发后会先写入 `user` 角色消息事件，再输出 `assistant` 增量到 `done`。
+- 失败语义：
+  - 子进程启动失败：HTTP `500` + `code=4004`。
+  - 运行期异常（如超时）：事件流内输出 `message.done`，其 `payload.raw_type=assistant_error`，并携带错误文本。
 
 ## 4. 实时接口
 1. `GET /ws/v1/adapters/{adapter}/sessions/{id}`

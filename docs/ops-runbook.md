@@ -19,6 +19,14 @@
    - `AUTH_TOKEN`
    - `ENABLED_ADAPTERS`
    - `DEFAULT_ADAPTER`
+   - `CODEX_STREAM_MODE`
+   - `CODEX_CLI_BIN`
+   - `CODEX_CLI_ARGS`
+   - `CODEX_CLI_TIMEOUT_MS`
+   - `CODEX_MOCK_FALLBACK`
+   - `CODEX_HISTORY_ENABLED`
+   - `CODEX_HISTORY_DIR`
+   - `CODEX_HISTORY_SCAN_TTL_MS`
 2. 端口可用，无冲突。
 3. 日志目录可写，磁盘空间充足。
 4. 对外暴露场景下反向代理与鉴权已配置。

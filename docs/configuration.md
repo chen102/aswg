@@ -15,10 +15,19 @@
 4. `ENABLED_ADAPTERS`：启用的适配器列表
 5. `DEFAULT_ADAPTER`：默认适配器
 6. `LOG_LEVEL`：日志级别
+7. `RATE_LIMIT_SESSIONS_PER_SEC`：会话列表接口每秒限流阈值（默认 `30`，`0` 表示关闭）
+8. `CODEX_STREAM_MODE`：Codex 续接模式，`real|mock`（默认 `real`）
+9. `CODEX_CLI_BIN`：真实模式下调用的 CLI 可执行文件（默认 `codex`）
+10. `CODEX_CLI_ARGS`：真实模式 CLI 参数（默认 `exec --json`）
+11. `CODEX_CLI_TIMEOUT_MS`：真实模式单次 continue 子进程超时（默认 `90000`）
+12. `CODEX_MOCK_FALLBACK`：真实模式失败时是否回退 mock（默认 `false`）
+13. `CODEX_HISTORY_ENABLED`：是否默认读取本机历史会话（默认 `true`）
+14. `CODEX_HISTORY_DIR`：历史会话目录（默认 `~/.codex/sessions`）
+15. `CODEX_HISTORY_SCAN_TTL_MS`：历史索引缓存时间（默认 `5000`）
 
 ## 3. 前端配置
 前端采用两层配置：
-1. 默认配置文件：`public/runtime-config.json`
+1. 默认配置文件：`frontend/src/runtime-config.json`
 2. 本地覆盖配置：`localStorage`（来自设置页）
 
 `runtime-config.json` 示例：
@@ -47,3 +56,21 @@
 1. 不提交真实 Token。
 2. 提交 `config.example.*`，不提交私有 `config.*`。
 3. CI 中增加配置文件结构校验。
+
+## 7. MVP 环境变量（后端）
+1. `SERVER_HOST`：默认 `127.0.0.1`
+2. `SERVER_PORT`：默认 `8080`
+3. `AUTH_TOKEN`：为空时不强制鉴权
+4. `ENABLED_ADAPTERS`：默认 `codex`
+5. `DEFAULT_ADAPTER`：默认 `codex`
+6. `CODEX_SEED_FILE`：默认 `docs/resume-smoke.jsonl`
+7. `FRONTEND_DIR`：默认 `frontend/src`
+8. `RATE_LIMIT_SESSIONS_PER_SEC`：默认 `30`
+9. `CODEX_STREAM_MODE`：默认 `real`
+10. `CODEX_CLI_BIN`：默认 `codex`
+11. `CODEX_CLI_ARGS`：默认 `exec --json`
+12. `CODEX_CLI_TIMEOUT_MS`：默认 `90000`
+13. `CODEX_MOCK_FALLBACK`：默认 `false`
+14. `CODEX_HISTORY_ENABLED`：默认 `true`
+15. `CODEX_HISTORY_DIR`：默认 `~/.codex/sessions`
+16. `CODEX_HISTORY_SCAN_TTL_MS`：默认 `5000`
