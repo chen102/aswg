@@ -46,21 +46,95 @@
 
 建议通过 `frontend/src/runtime-config.json` + `localStorage` 覆盖的方式实现，避免每次变更都重新构建前端。
 
-## 快速启动（MVP）
-1. 启动服务：
+## 快速开始（10 分钟）
+
+### 1) 前置依赖
+1. `Go >= 1.22`
+2. `codex` CLI（`real` 模式必需）
+3. 可选：`Node.js >= 20`（仅用于前端静态检查或脚本）
+
+建议先确认：
+```bash
+go version
+codex --version
+```
+
+若你要使用真实流式对话（默认 `CODEX_STREAM_MODE=real`），请先确保 `codex` CLI 可正常使用。
+
+### 2) 一键启动（默认无鉴权）
+在仓库根目录执行：
 ```bash
 cd backend
+SERVER_HOST=127.0.0.1 \
+SERVER_PORT=8080 \
+AUTH_TOKEN= \
+ENABLED_ADAPTERS=codex \
+DEFAULT_ADAPTER=codex \
+CODEX_STREAM_MODE=real \
+CODEX_CLI_BIN=codex \
+CODEX_CLI_ARGS='exec --json --dangerously-bypass-approvals-and-sandbox' \
+FRONTEND_DIR=../frontend/src \
 go run ./cmd/server
 ```
-2. 打开浏览器访问：
-`http://127.0.0.1:8080`
-3. 最小联调链路：
-- 设置页点击“连接测试”
-- 会话列表选择 `codex` 会话
-- 输入 prompt 执行 `continue`
-- 观察时间线和 WebSocket 实时更新
 
-可选环境变量：
+启动后访问：
+`http://127.0.0.1:8080`
+
+### 3) 最小联调链路
+1. 设置页点击“连接测试”。
+2. 会话列表选择 `codex` 会话。
+3. 输入 prompt 后执行 `continue`。
+4. 观察消息气泡与 WebSocket 实时流式更新。
+
+### 4) API 快速自检
+无鉴权模式：
+```bash
+curl -sS http://127.0.0.1:8080/api/v1/health
+curl -sS http://127.0.0.1:8080/api/v1/adapters
+curl -sS 'http://127.0.0.1:8080/api/v1/adapters/codex/sessions?limit=20'
+```
+
+### 5) 开启鉴权（生产/公网建议）
+启动时设置：
+```bash
+AUTH_TOKEN='replace-with-your-token'
+```
+
+调用 REST：
+```bash
+curl -sS -H 'Authorization: Bearer replace-with-your-token' \
+  http://127.0.0.1:8080/api/v1/adapters
+```
+
+浏览器 WebSocket（Query 方式）：
+```text
+ws://127.0.0.1:8080/ws/v1/adapters/codex/sessions/<session_id>?access_token=replace-with-your-token
+```
+
+### 6) 局域网/公网访问
+1. 局域网访问请将服务监听到所有网卡：
+```bash
+SERVER_HOST=0.0.0.0
+```
+2. 前端设置页中：
+   - `api_base_url` 填 `http://<可访问IP>:<端口>`
+   - `ws_base_url` 填 `ws://<可访问IP>:<端口>`
+3. 反向代理或 FRP 场景（例如公网 `8081` 映射到本地 `8080`）：
+   - `api_base_url=http://<公网IP或域名>:8081`
+   - `ws_base_url=ws://<公网IP或域名>:8081`
+4. 若公网是 HTTPS，请对应使用 `https://` 与 `wss://`，避免浏览器 mixed-content 拦截。
+
+### 7) 常见问题
+1. `Failed to fetch`
+   - 检查服务是否已启动、`api_base_url` 是否可达、`AUTH_TOKEN` 是否匹配。
+2. WebSocket 连接失败或 `4010 unauthorized`
+   - 检查 `ws_base_url`、`access_token` 或 `Authorization` Header 是否正确。
+3. `codex: command not found` 或 real 模式没有 AI 回复
+   - 安装/修复 `codex` CLI，或临时切换 `CODEX_STREAM_MODE=mock` 做联调。
+4. `git push` 报 `Permission denied (publickey)`
+   - 检查 SSH key 是否已加入 GitHub，或改用 HTTPS + PAT。
+
+### 8) MVP 常用环境变量
 1. `SERVER_HOST`（默认 `127.0.0.1`）
 2. `SERVER_PORT`（默认 `8080`）
 3. `AUTH_TOKEN`（为空时不强制鉴权）
@@ -68,11 +142,15 @@ go run ./cmd/server
 5. `DEFAULT_ADAPTER`（默认 `codex`）
 6. `CODEX_SEED_FILE`（默认 `docs/resume-smoke.jsonl`）
 7. `FRONTEND_DIR`（默认 `frontend/src`）
-8. `CODEX_STREAM_MODE`（`real|mock`，默认 `real`）
-9. `CODEX_CLI_BIN`（默认 `codex`）
-10. `CODEX_CLI_ARGS`（默认 `exec --json --dangerously-bypass-approvals-and-sandbox`）
-11. `CODEX_CLI_TIMEOUT_MS`（默认 `90000`）
-12. `CODEX_MOCK_FALLBACK`（默认 `false`）
+8. `RATE_LIMIT_SESSIONS_PER_SEC`（默认 `30`，`0` 表示关闭）
+9. `CODEX_STREAM_MODE`（`real|mock`，默认 `real`）
+10. `CODEX_CLI_BIN`（默认 `codex`）
+11. `CODEX_CLI_ARGS`（默认 `exec --json --dangerously-bypass-approvals-and-sandbox`）
+12. `CODEX_CLI_TIMEOUT_MS`（默认 `90000`）
+13. `CODEX_MOCK_FALLBACK`（默认 `false`）
+14. `CODEX_HISTORY_ENABLED`（默认 `true`）
+15. `CODEX_HISTORY_DIR`（默认 `~/.codex/sessions`）
+16. `CODEX_HISTORY_SCAN_TTL_MS`（默认 `5000`）
 
 ## 图文档约定（Drawio）
 1. `docs/diagrams/*.drawio` 保存源文件。
@@ -92,7 +170,7 @@ Windows 也可使用：
 3. WebSocket 流式事件推送（event/heartbeat/done）。
 4. 前端设置页与连接测试能力。
 5. 前端最小闭环：列表 -> 详情 -> continue -> 流式更新。
-6. Codex continue 默认走 `real` 模式（`codex exec --json`），本地可按需启用 mock fallback。
+6. Codex continue 默认走 `real` 模式（`codex exec --json --dangerously-bypass-approvals-and-sandbox`），本地可按需启用 mock fallback。
 
 ## 下一步
 1. 补齐 Go 单元测试与适配器一致性测试自动化。
