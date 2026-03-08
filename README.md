@@ -163,7 +163,7 @@ SERVER_HOST=0.0.0.0
 9. `CODEX_STREAM_MODE`（`real|mock`，默认 `real`）
 10. `CODEX_CLI_BIN`（默认 `codex`）
 11. `CODEX_CLI_ARGS`（默认 `exec --json --dangerously-bypass-approvals-and-sandbox`）
-12. `CODEX_CLI_TIMEOUT_MS`（默认 `90000`）
+12. `CODEX_CLI_TIMEOUT_MS`（默认 `300000`）
 13. `CODEX_MOCK_FALLBACK`（默认 `false`）
 14. `CODEX_HISTORY_ENABLED`（默认 `true`）
 15. `CODEX_HISTORY_DIR`（默认 `~/.codex/sessions`）

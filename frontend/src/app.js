@@ -11,6 +11,8 @@ const state = {
   messages: [],
   assistantDraftId: "",
   continuePending: false,
+  wsReconnectTimer: null,
+  wsReconnectAttempts: 0,
 };
 
 const el = {
@@ -656,15 +658,32 @@ async function connectStream() {
   const adapter = currentAdapter();
   const sessionID = state.selectedSessionID;
   if (!adapter || !sessionID) {
+    closeStream();
     return;
   }
 
-  closeStream();
+  cancelStreamReconnect();
+  closeStream(false);
   const wsURL = `${state.config.ws_base_url}/ws/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}?last_seq=${state.lastSeq}`;
-  const ws = new WebSocket(wsURL);
+  let ws;
+  try {
+    ws = new WebSocket(wsURL);
+  } catch (err) {
+    setStreamStatus(`WS 连接失败: ${err.message}`, true);
+    scheduleStreamReconnect(adapter, sessionID);
+    return;
+  }
+  ws.__manualClose = false;
+  ws.__adapter = adapter;
+  ws.__sessionID = sessionID;
   state.ws = ws;
 
   ws.addEventListener("open", () => {
+    if (state.ws !== ws) {
+      return;
+    }
+    cancelStreamReconnect();
+    state.wsReconnectAttempts = 0;
     setStreamStatus("WS 已连接", false);
   });
 
@@ -679,15 +698,55 @@ async function connectStream() {
 
   ws.addEventListener("close", () => {
     if (state.ws === ws) {
-      setStreamStatus("WS 已断开", true);
+      state.ws = null;
     }
+    if (ws.__manualClose) {
+      return;
+    }
+    if (state.selectedSessionID !== ws.__sessionID) {
+      return;
+    }
+    if (currentAdapter() !== ws.__adapter) {
+      return;
+    }
+    scheduleStreamReconnect(ws.__adapter, ws.__sessionID);
   });
 
   ws.addEventListener("error", () => {
-    if (state.ws === ws) {
-      setStreamStatus("WS 连接错误", true);
-    }
+    // close 事件统一处理重连；这里仅提示瞬时错误。
+    setStreamStatus("WS 连接错误，等待重连...", true);
   });
+}
+
+function scheduleStreamReconnect(adapter, sessionID) {
+  if (!adapter || !sessionID) {
+    return;
+  }
+  if (state.wsReconnectTimer) {
+    return;
+  }
+  const attempts = state.wsReconnectAttempts + 1;
+  state.wsReconnectAttempts = attempts;
+  const delay = Math.min(10000, 500 * 2 ** Math.max(0, attempts - 1));
+  setStreamStatus(`WS 已断开，${delay}ms 后重连（第 ${attempts} 次）`, true);
+
+  state.wsReconnectTimer = setTimeout(async () => {
+    state.wsReconnectTimer = null;
+    if (state.selectedSessionID !== sessionID) {
+      return;
+    }
+    if (currentAdapter() !== adapter) {
+      return;
+    }
+    await connectStream();
+  }, delay);
+}
+
+function cancelStreamReconnect() {
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
 }
 
 function handleWSFrame(frame) {
@@ -725,10 +784,15 @@ function handleWSFrame(frame) {
   renderChatThread();
 }
 
-function closeStream() {
+function closeStream(resetRetry = true) {
+  cancelStreamReconnect();
   if (state.ws) {
+    state.ws.__manualClose = true;
     state.ws.close();
     state.ws = null;
+  }
+  if (resetRetry) {
+    state.wsReconnectAttempts = 0;
   }
 }
 

@@ -19,7 +19,7 @@
 8. `CODEX_STREAM_MODE`：Codex 续接模式，`real|mock`（默认 `real`）
 9. `CODEX_CLI_BIN`：真实模式下调用的 CLI 可执行文件（默认 `codex`）
 10. `CODEX_CLI_ARGS`：真实模式 CLI 参数（默认 `exec --json`）
-11. `CODEX_CLI_TIMEOUT_MS`：真实模式单次 continue 子进程超时（默认 `90000`）
+11. `CODEX_CLI_TIMEOUT_MS`：真实模式单次 continue 子进程超时（默认 `300000`）
 12. `CODEX_MOCK_FALLBACK`：真实模式失败时是否回退 mock（默认 `false`）
 13. `CODEX_HISTORY_ENABLED`：是否默认读取本机历史会话（默认 `true`）
 14. `CODEX_HISTORY_DIR`：历史会话目录（默认 `~/.codex/sessions`）
@@ -75,7 +75,7 @@
 9. `CODEX_STREAM_MODE`：默认 `real`
 10. `CODEX_CLI_BIN`：默认 `codex`
 11. `CODEX_CLI_ARGS`：默认 `exec --json`
-12. `CODEX_CLI_TIMEOUT_MS`：默认 `90000`
+12. `CODEX_CLI_TIMEOUT_MS`：默认 `300000`
 13. `CODEX_MOCK_FALLBACK`：默认 `false`
 14. `CODEX_HISTORY_ENABLED`：默认 `true`
 15. `CODEX_HISTORY_DIR`：默认 `~/.codex/sessions`

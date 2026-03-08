@@ -32,7 +32,7 @@ const (
 	defaultCLIBin        = "codex"
 	defaultCLIArgs       = "exec --json --dangerously-bypass-approvals-and-sandbox"
 	cliBypassFlag        = "--dangerously-bypass-approvals-and-sandbox"
-	defaultCLITimeout    = 90 * time.Second
+	defaultCLITimeout    = 5 * time.Minute
 	defaultHistoryTTL    = 5 * time.Second
 	defaultHistorySource = "history"
 	sessionStatusIdle    = "idle"
