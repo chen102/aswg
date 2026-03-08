@@ -24,6 +24,12 @@
 13. `CODEX_HISTORY_ENABLED`：是否默认读取本机历史会话（默认 `true`）
 14. `CODEX_HISTORY_DIR`：历史会话目录（默认 `~/.codex/sessions`）
 15. `CODEX_HISTORY_SCAN_TTL_MS`：历史索引缓存时间（默认 `5000`）
+16. `PICOCLAW_WS_BASE_URL`：Pico WebSocket 基地址（默认 `ws://127.0.0.1:8080`）
+17. `PICOCLAW_TOKEN`：Pico 鉴权 Token（启用 `picoclaw` 适配器时必填）
+18. `PICOCLAW_ALLOW_TOKEN_QUERY`：是否允许 token 走 Query（默认 `false`）
+19. `PICOCLAW_DIAL_TIMEOUT_MS`：Pico 连接握手超时（默认 `5000`）
+20. `PICOCLAW_CONTINUE_TIMEOUT_MS`：单次 continue 总超时（默认 `120000`）
+21. `PICOCLAW_READ_IDLE_TIMEOUT_MS`：流式读取空闲超时（默认 `45000`）
 
 ## 3. 前端配置
 前端采用两层配置：
@@ -74,3 +80,9 @@
 14. `CODEX_HISTORY_ENABLED`：默认 `true`
 15. `CODEX_HISTORY_DIR`：默认 `~/.codex/sessions`
 16. `CODEX_HISTORY_SCAN_TTL_MS`：默认 `5000`
+17. `PICOCLAW_WS_BASE_URL`：默认 `ws://127.0.0.1:8080`
+18. `PICOCLAW_TOKEN`：默认空（启用 `picoclaw` 时必填）
+19. `PICOCLAW_ALLOW_TOKEN_QUERY`：默认 `false`
+20. `PICOCLAW_DIAL_TIMEOUT_MS`：默认 `5000`
+21. `PICOCLAW_CONTINUE_TIMEOUT_MS`：默认 `120000`
+22. `PICOCLAW_READ_IDLE_TIMEOUT_MS`：默认 `45000`

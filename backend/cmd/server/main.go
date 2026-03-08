@@ -9,6 +9,7 @@ import (
 
 	"agent-session-web-gateway/backend/internal/adapter"
 	"agent-session-web-gateway/backend/internal/adapter/codex"
+	"agent-session-web-gateway/backend/internal/adapter/picoclaw"
 	"agent-session-web-gateway/backend/internal/server"
 )
 
@@ -28,6 +29,14 @@ func main() {
 			log.Fatalf("init codex adapter failed: %v", err)
 		}
 		registry.Register(codexAdapter)
+	}
+
+	if _, ok := enabled["picoclaw"]; ok {
+		picoAdapter, err := picoclaw.NewAdapter()
+		if err != nil {
+			log.Fatalf("init picoclaw adapter failed: %v", err)
+		}
+		registry.Register(picoAdapter)
 	}
 
 	if len(registry.List()) == 0 {

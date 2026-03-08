@@ -8,7 +8,7 @@
 2. 在同一会话中继续提问。
 3. 实时接收流式事件。
 
-首个参考适配器为 Codex，架构上支持后续扩展到其他 Agent CLI。
+当前已提供 `codex` 与 `picoclaw` 两个适配器实现，架构上支持继续扩展到其他 Agent CLI。
 
 ## 设计原则
 1. 多 Agent 可扩展：通过 Adapter 接口接入。
@@ -79,6 +79,23 @@ go run ./cmd/server
 
 启动后访问：
 `http://127.0.0.1:8080`
+
+如需同时启用 PicoClaw 适配器（连接外部 Pico channel）：
+```bash
+cd backend
+SERVER_HOST=127.0.0.1 \
+SERVER_PORT=8080 \
+AUTH_TOKEN= \
+ENABLED_ADAPTERS=codex,picoclaw \
+DEFAULT_ADAPTER=codex \
+CODEX_STREAM_MODE=real \
+CODEX_CLI_BIN=codex \
+CODEX_CLI_ARGS='exec --json --dangerously-bypass-approvals-and-sandbox' \
+PICOCLAW_WS_BASE_URL=ws://127.0.0.1:8081 \
+PICOCLAW_TOKEN=replace-with-your-pico-token \
+FRONTEND_DIR=../frontend/src \
+go run ./cmd/server
+```
 
 ### 3) 最小联调链路
 1. 设置页点击“连接测试”。
@@ -151,6 +168,12 @@ SERVER_HOST=0.0.0.0
 14. `CODEX_HISTORY_ENABLED`（默认 `true`）
 15. `CODEX_HISTORY_DIR`（默认 `~/.codex/sessions`）
 16. `CODEX_HISTORY_SCAN_TTL_MS`（默认 `5000`）
+17. `PICOCLAW_WS_BASE_URL`（默认 `ws://127.0.0.1:8080`）
+18. `PICOCLAW_TOKEN`（默认空，启用 `picoclaw` 适配器时必填）
+19. `PICOCLAW_ALLOW_TOKEN_QUERY`（默认 `false`）
+20. `PICOCLAW_DIAL_TIMEOUT_MS`（默认 `5000`）
+21. `PICOCLAW_CONTINUE_TIMEOUT_MS`（默认 `120000`）
+22. `PICOCLAW_READ_IDLE_TIMEOUT_MS`（默认 `45000`）
 
 ## 图文档约定（Drawio）
 1. `docs/diagrams/*.drawio` 保存源文件。
@@ -164,9 +187,9 @@ Windows 也可使用：
 5. 推荐按 `docs/workflows/drawio-doc-workflow.md` 执行完整图文发布流程。
 
 ## 状态
-当前仓库已完成 MVP 主链路实现，并具备真实 Codex CLI 流式桥接：
+当前仓库已完成 MVP 主链路实现，并具备 `codex` 与 `picoclaw` 双适配器能力：
 1. Go 后端统一 API（health/adapters/sessions/detail/events/continue）。
-2. Adapter Registry 与 Codex Adapter 参考实现。
+2. Adapter Registry 与 Codex/PicoClaw Adapter 参考实现。
 3. WebSocket 流式事件推送（event/heartbeat/done）。
 4. 前端设置页与连接测试能力。
 5. 前端最小闭环：列表 -> 详情 -> continue -> 流式更新。
