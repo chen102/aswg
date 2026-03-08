@@ -644,6 +644,11 @@ function renderChatThread() {
     el.chatThread.appendChild(bubble);
   });
 
+  const tailSpacer = document.createElement("div");
+  tailSpacer.className = "chat-tail-spacer";
+  tailSpacer.setAttribute("aria-hidden", "true");
+  el.chatThread.appendChild(tailSpacer);
+
   el.chatThread.scrollTop = el.chatThread.scrollHeight;
 }
 

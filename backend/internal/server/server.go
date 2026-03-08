@@ -31,7 +31,7 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 const frontendAppRuntimePatch = `
 ;(() => {
-  const PATCH_MARK = "ASWG Runtime Patch v15";
+  const PATCH_MARK = "ASWG Runtime Patch v17";
   if (window.__aswgRuntimePatchApplied === PATCH_MARK) {
     return;
   }
@@ -148,8 +148,9 @@ const frontendAppRuntimePatch = `
       "body.aswg-im-mode .session-detail>#chat-thread,body.aswg-chat-pin .session-detail>#chat-thread{grid-row:2;min-height:0;height:auto;max-height:none;overflow:auto;}",
       "body.aswg-im-mode .session-detail>#continue-form,body.aswg-chat-pin .session-detail>#continue-form{grid-row:3;align-self:end;}",
       "body.aswg-im-mode .session-detail .aswg-chat-head .stream-row,body.aswg-chat-pin .session-detail .aswg-chat-head .stream-row{margin-top:4px;}",
-      "body.aswg-im-mode .chat-thread{height:auto;max-height:none;min-height:0;overflow:auto;scroll-behavior:smooth;grid-auto-rows:max-content;align-content:start;padding-right:12px;}",
-      "body.aswg-chat-pin .chat-thread{height:auto;max-height:none;min-height:0;overflow:auto;scroll-behavior:smooth;grid-auto-rows:max-content;align-content:start;padding-right:12px;}",
+      "body.aswg-im-mode .chat-thread{height:auto;max-height:none;min-height:0;overflow:auto;scroll-behavior:smooth;grid-auto-rows:max-content;align-content:start;padding-right:12px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));scroll-padding-bottom:calc(26px + env(safe-area-inset-bottom,0px));}",
+      "body.aswg-chat-pin .chat-thread{height:auto;max-height:none;min-height:0;overflow:auto;scroll-behavior:smooth;grid-auto-rows:max-content;align-content:start;padding-right:12px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));scroll-padding-bottom:calc(26px + env(safe-area-inset-bottom,0px));}",
+      "body.aswg-im-mode .chat-tail-spacer,body.aswg-chat-pin .chat-tail-spacer{height:14px;min-height:calc(14px + env(safe-area-inset-bottom,0px));pointer-events:none;}",
       "body.aswg-im-mode .chat-bubble,body.aswg-chat-pin .chat-bubble{overflow:visible !important;max-height:none !important;}",
       "body.aswg-im-mode .chat-body,body.aswg-chat-pin .chat-body{display:block;white-space:pre-wrap !important;word-break:break-word !important;overflow:visible !important;text-overflow:clip;}",
       "body.aswg-im-mode .aswg-history-hint,body.aswg-chat-pin .aswg-history-hint{margin:0 auto 8px;padding:4px 10px;border-radius:999px;font-size:11px;line-height:1.2;color:var(--muted);background:rgba(194,184,163,.24);width:max-content;max-width:100%;}",
@@ -227,12 +228,16 @@ const frontendAppRuntimePatch = `
     if (topBtn.dataset.boundClick !== "1") {
       topBtn.dataset.boundClick = "1";
       topBtn.addEventListener("click", () => {
+        state.__aswgAutoFollowLatest = false;
         thread.scrollTo({ top: 0, behavior: "smooth" });
       });
     }
     if (bottomBtn.dataset.boundClick !== "1") {
       bottomBtn.dataset.boundClick = "1";
       bottomBtn.addEventListener("click", () => {
+        state.__aswgAutoFollowLatest = true;
+        const win = ensureChatWindowState();
+        win.forceLatest = true;
         thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
       });
     }
@@ -246,12 +251,24 @@ const frontendAppRuntimePatch = `
     return { topBtn, bottomBtn, thread };
   }
 
+  function syncAutoFollowState(thread) {
+    const target = thread || el.chatThread;
+    if (!target) {
+      return false;
+    }
+    const distanceToBottom = Math.max(0, target.scrollHeight - target.clientHeight - target.scrollTop);
+    const followLatest = distanceToBottom <= 120;
+    state.__aswgAutoFollowLatest = followLatest;
+    return followLatest;
+  }
+
   function updateChatQuickNav() {
     const result = ensureChatQuickNav();
     if (!result) {
       return;
     }
     const thread = result.thread;
+    syncAutoFollowState(thread);
     const scrollable = thread.scrollHeight - thread.clientHeight > 160;
     const distanceToBottom = Math.max(0, thread.scrollHeight - thread.clientHeight - thread.scrollTop);
     const showTop = scrollable && thread.scrollTop > 24;
@@ -308,6 +325,9 @@ const frontendAppRuntimePatch = `
         forceLatest: false,
       };
     }
+    if (typeof state.__aswgAutoFollowLatest !== "boolean") {
+      state.__aswgAutoFollowLatest = true;
+    }
     return state.__aswgChatWindow;
   }
 
@@ -318,6 +338,7 @@ const frontendAppRuntimePatch = `
     win.visibleStart = Math.max(0, total - win.chunkSize);
     win.loadingOlder = false;
     win.forceLatest = true;
+    state.__aswgAutoFollowLatest = true;
   }
 
   function renderHistoryHint() {
@@ -380,6 +401,7 @@ const frontendAppRuntimePatch = `
     thread.addEventListener(
       "scroll",
       () => {
+        syncAutoFollowState(thread);
         updateChatQuickNav();
         maybeLoadOlderMessages();
       },
@@ -798,10 +820,10 @@ const frontendAppRuntimePatch = `
         }
 
         const thread = el.chatThread;
-        const keepGapFromBottom =
-          thread && thread.scrollHeight - thread.clientHeight - thread.scrollTop > 140
-            ? thread.scrollHeight - thread.clientHeight - thread.scrollTop
-            : null;
+        const distanceToBottom = thread ? Math.max(0, thread.scrollHeight - thread.clientHeight - thread.scrollTop) : 0;
+        const autoFollowLatest = state.__aswgAutoFollowLatest !== false;
+        const shouldStickToLatest = Boolean(win.forceLatest || autoFollowLatest);
+        const keepGapFromBottom = thread && !shouldStickToLatest && distanceToBottom > 0 ? distanceToBottom : null;
 
         const visibleMessages = allMessages.slice(Math.max(0, Number(win.visibleStart || 0)));
         state.messages = visibleMessages;
@@ -812,11 +834,12 @@ const frontendAppRuntimePatch = `
         }
 
         const nextThread = el.chatThread;
-        if (nextThread && keepGapFromBottom !== null) {
+        if (nextThread && shouldStickToLatest) {
+          nextThread.scrollTop = nextThread.scrollHeight;
+          state.__aswgAutoFollowLatest = true;
+        } else if (nextThread && keepGapFromBottom !== null) {
           const maxTop = Math.max(0, nextThread.scrollHeight - nextThread.clientHeight);
           nextThread.scrollTop = Math.max(0, maxTop - keepGapFromBottom);
-        } else if (nextThread && win.forceLatest) {
-          nextThread.scrollTop = nextThread.scrollHeight;
         }
         win.forceLatest = false;
         renderHistoryHint();
@@ -922,6 +945,9 @@ const frontendAppRuntimePatch = `
     if (el.continueForm && el.continueForm.dataset.statusPatchBound !== "1") {
       el.continueForm.dataset.statusPatchBound = "1";
       el.continueForm.addEventListener("submit", () => {
+        state.__aswgAutoFollowLatest = true;
+        const win = ensureChatWindowState();
+        win.forceLatest = true;
         setTimeout(() => {
           if (state.continuePending) {
             updateLocalSessionStatus(state.selectedSessionID, "running");

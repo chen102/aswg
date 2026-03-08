@@ -277,6 +277,13 @@ textarea {
   display: grid;
   gap: 8px;
   align-content: start;
+  scroll-padding-bottom: 28px;
+}
+
+.chat-tail-spacer {
+  height: 14px;
+  min-height: calc(14px + env(safe-area-inset-bottom, 0px));
+  pointer-events: none;
 }
 
 .chat-empty {
