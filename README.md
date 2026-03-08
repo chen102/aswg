@@ -80,6 +80,32 @@ go run ./cmd/server
 启动后访问：
 `http://127.0.0.1:8080`
 
+### 2.1) 本地 Pico 联调（可选）
+如果你要本地验证 `picoclaw` adapter，可先启动 mock pico 服务：
+```bash
+cd backend
+MOCK_PICO_HOST=127.0.0.1 \
+MOCK_PICO_PORT=18081 \
+MOCK_PICO_TOKEN=pico-dev-token \
+go run ./cmd/mock-pico
+```
+
+再启动后端：
+```bash
+cd backend
+SERVER_HOST=127.0.0.1 \
+SERVER_PORT=8080 \
+AUTH_TOKEN= \
+ENABLED_ADAPTERS=codex,picoclaw \
+DEFAULT_ADAPTER=picoclaw \
+PICOCLAW_WS_BASE_URL=ws://127.0.0.1:18081 \
+PICOCLAW_TOKEN=pico-dev-token \
+FRONTEND_DIR=../frontend/src \
+go run ./cmd/server
+```
+
+完整操作可参考：`docs/dev-smoke-picoclaw.md`。
+
 如需同时启用 PicoClaw 适配器（连接外部 Pico channel）：
 ```bash
 cd backend
