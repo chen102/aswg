@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,18 +35,24 @@ const (
 	cliBypassFlag        = "--dangerously-bypass-approvals-and-sandbox"
 	defaultCLITimeout    = 5 * time.Minute
 	defaultHistoryTTL    = 5 * time.Second
+	defaultHistoryWindow = 10 * time.Minute
+	defaultHistoryTail   = 2 * time.Second
 	defaultHistorySource = "history"
 	sessionStatusIdle    = "idle"
 	sessionStatusRunning = "running"
 )
 
 type sessionState struct {
-	detail      model.SessionDetail
-	events      []model.SessionEvent
-	nextSeq     int64
-	subscribers map[int]*subscriber
-	nextSubID   int
-	codexThread string
+	detail              model.SessionDetail
+	events              []model.SessionEvent
+	nextSeq             int64
+	subscribers         map[int]*subscriber
+	nextSubID           int
+	codexThread         string
+	historyPath         string
+	historyOffset       int64
+	historyFollowActive bool
+	historyFollowPaused bool
 }
 
 type subscriber struct {
@@ -67,6 +74,8 @@ type Adapter struct {
 	historyEnabled       bool
 	historyDir           string
 	historyTTL           time.Duration
+	historyActiveWindow  time.Duration
+	historyTailInterval  time.Duration
 	externalSessionIndex map[string]externalSessionInfo
 	externalIndexAt      time.Time
 }
@@ -79,6 +88,14 @@ type idempotencyRecord struct {
 type streamResult struct {
 	deltaCount int
 	err        error
+}
+
+type approvalRequiredError struct {
+	threadID string
+}
+
+func (e approvalRequiredError) Error() string {
+	return "codex cli requires interactive approval"
 }
 
 type commandOutputLine struct {
@@ -95,6 +112,11 @@ type historyLine struct {
 	Timestamp string          `json:"timestamp"`
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
+}
+
+type historyEventMsg struct {
+	Type   string `json:"type"`
+	TurnID string `json:"turn_id"`
 }
 
 type historySessionMeta struct {
@@ -120,6 +142,8 @@ var _ adapter.AgentAdapter = (*Adapter)(nil)
 func NewAdapter(seedPath string) (*Adapter, error) {
 	streamMode, cliBin, cliArgs, cliTimeout, mockFallback := loadRuntimeOptions()
 	historyEnabled, historyDir, historyTTL := loadHistoryOptions()
+	historyActiveWindow := loadHistoryActiveWindow()
+	historyTailInterval := loadHistoryTailInterval()
 
 	now := time.Now().UTC()
 	sess := &sessionState{
@@ -200,6 +224,8 @@ func NewAdapter(seedPath string) (*Adapter, error) {
 		historyEnabled:       historyEnabled,
 		historyDir:           historyDir,
 		historyTTL:           historyTTL,
+		historyActiveWindow:  historyActiveWindow,
+		historyTailInterval:  historyTailInterval,
 		externalSessionIndex: make(map[string]externalSessionInfo),
 	}, nil
 }
@@ -379,6 +405,68 @@ func (a *Adapter) DiscoverSessions(ctx context.Context, req model.DiscoverReques
 		return model.PagedSessions{}, fmt.Errorf("%w: cursor", model.ErrInvalidParam)
 	}
 
+	history, err := a.loadExternalSessionIndex(ctx)
+	if err != nil {
+		return model.PagedSessions{}, err
+	}
+	historyAliasToLocal := make(map[string]string)
+	if len(history) > 0 {
+		a.mu.Lock()
+		threadToSessionID := make(map[string]string, len(a.sessions))
+		for id, state := range a.sessions {
+			if _, deleted := a.deletedSessions[id]; deleted {
+				continue
+			}
+			if state == nil {
+				continue
+			}
+			threadID := strings.TrimSpace(state.codexThread)
+			if threadID == "" {
+				threadID = inferSessionThreadID(state.detail.ID, state.detail.Metadata)
+			}
+			if threadID == "" {
+				continue
+			}
+			existingID, exists := threadToSessionID[threadID]
+			if !exists {
+				threadToSessionID[threadID] = id
+				continue
+			}
+			existingState, ok := a.sessions[existingID]
+			if !ok || existingState == nil {
+				threadToSessionID[threadID] = id
+				continue
+			}
+			// Prefer local "cli" session over history-backed session for the same Codex thread.
+			if isHistoryBackedSession(existingState.detail) && !isHistoryBackedSession(state.detail) {
+				threadToSessionID[threadID] = id
+			}
+		}
+
+		for historyID, info := range history {
+			targetID := ""
+			historyThreadID := inferSessionThreadID(info.detail.ID, info.detail.Metadata)
+			if historyThreadID != "" {
+				targetID = threadToSessionID[historyThreadID]
+			}
+			if targetID == "" {
+				if _, exists := a.sessions[historyID]; exists {
+					targetID = historyID
+				}
+			}
+			if targetID == "" {
+				continue
+			}
+			state, exists := a.sessions[targetID]
+			if !exists || state == nil {
+				continue
+			}
+			applyHistoryDetail(&state.detail, info)
+			historyAliasToLocal[historyID] = targetID
+		}
+		a.mu.Unlock()
+	}
+
 	itemMap := make(map[string]model.SessionSummary)
 	a.mu.RLock()
 	for id, s := range a.sessions {
@@ -389,12 +477,11 @@ func (a *Adapter) DiscoverSessions(ctx context.Context, req model.DiscoverReques
 	}
 	a.mu.RUnlock()
 
-	history, err := a.loadExternalSessionIndex(ctx)
-	if err != nil {
-		return model.PagedSessions{}, err
-	}
 	for id, info := range history {
 		if a.isSessionDeleted(id) {
+			continue
+		}
+		if _, aliased := historyAliasToLocal[id]; aliased {
 			continue
 		}
 		if _, exists := itemMap[id]; exists {
@@ -462,6 +549,15 @@ func (a *Adapter) GetSession(ctx context.Context, sessionID string) (model.Sessi
 
 	if err := a.ensureSessionLoaded(ctx, sessionID); err != nil {
 		return model.SessionDetail{}, err
+	}
+	if history, err := a.loadExternalSessionIndex(ctx); err == nil {
+		if info, ok := history[sessionID]; ok {
+			a.mu.Lock()
+			if s, exists := a.sessions[sessionID]; exists && isHistoryBackedSession(s.detail) {
+				applyHistoryDetail(&s.detail, info)
+			}
+			a.mu.Unlock()
+		}
 	}
 
 	a.mu.RLock()
@@ -551,6 +647,9 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 	if sess, exists := a.sessions[req.SessionID]; exists {
 		sess.detail.Status = sessionStatusRunning
 		sess.detail.UpdatedAt = now
+		if isHistoryBackedSession(sess.detail) {
+			sess.historyFollowPaused = true
+		}
 	}
 
 	startedAt := now
@@ -573,6 +672,7 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 
 	go func() {
 		defer a.setSessionStatus(req.SessionID, sessionStatusIdle)
+		defer a.resumeHistoryFollow(req.SessionID)
 		a.emitContinueEvents(ctx, req.SessionID, prompt)
 	}()
 	return job, nil
@@ -594,6 +694,7 @@ func (a *Adapter) Subscribe(ctx context.Context, sessionID string, fromSeq int64
 		backlog: make([]model.SessionEvent, 0, 16),
 	}
 	s.subscribers[subID] = sub
+	historyFollow := isHistoryBackedSession(s.detail)
 
 	history := make([]model.SessionEvent, 0, len(s.events))
 	for _, ev := range s.events {
@@ -602,6 +703,10 @@ func (a *Adapter) Subscribe(ctx context.Context, sessionID string, fromSeq int64
 		}
 	}
 	a.mu.Unlock()
+
+	if historyFollow {
+		a.ensureHistoryFollower(sessionID)
+	}
 
 	var once sync.Once
 	unsubscribe := func() {
@@ -715,17 +820,19 @@ func (a *Adapter) ensureSessionLoaded(ctx context.Context, sessionID string) err
 		return model.ErrSessionNotFound
 	}
 
-	events, err := loadHistorySessionEvents(ctx, info.path, sessionID)
+	events, offset, err := loadHistorySessionEvents(ctx, info.path, sessionID)
 	if err != nil {
 		return fmt.Errorf("load history session %s failed: %w", sessionID, err)
 	}
 
 	state := &sessionState{
-		detail:      cloneSessionDetail(info.detail),
-		events:      events,
-		nextSeq:     1,
-		subscribers: make(map[int]*subscriber),
-		codexThread: inferSessionThreadID(info.detail.ID, info.detail.Metadata),
+		detail:        cloneSessionDetail(info.detail),
+		events:        events,
+		nextSeq:       1,
+		subscribers:   make(map[int]*subscriber),
+		codexThread:   inferSessionThreadID(info.detail.ID, info.detail.Metadata),
+		historyPath:   info.path,
+		historyOffset: offset,
 	}
 	if len(events) > 0 {
 		state.nextSeq = events[len(events)-1].Seq + 1
@@ -780,7 +887,7 @@ func (a *Adapter) loadExternalSessionIndex(ctx context.Context) (map[string]exte
 			return nil
 		}
 
-		info, ok := readHistorySessionSummary(path)
+		info, ok := readHistorySessionSummary(path, a.historyActiveWindow)
 		if !ok {
 			return nil
 		}
@@ -845,7 +952,167 @@ func (a *Adapter) isSessionDeleted(sessionID string) bool {
 	return deleted
 }
 
-func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
+func (a *Adapter) ensureHistoryFollower(sessionID string) {
+	interval := a.historyTailInterval
+	if interval <= 0 {
+		return
+	}
+	a.mu.Lock()
+	state, ok := a.sessions[sessionID]
+	if !ok || state.historyFollowActive || state.historyPath == "" || !isHistoryBackedSession(state.detail) {
+		a.mu.Unlock()
+		return
+	}
+	state.historyFollowActive = true
+	a.mu.Unlock()
+
+	go a.followHistory(sessionID, interval)
+}
+
+func (a *Adapter) followHistory(sessionID string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		a.mu.RLock()
+		state, ok := a.sessions[sessionID]
+		if !ok {
+			a.mu.RUnlock()
+			return
+		}
+		if state.historyFollowPaused {
+			a.mu.RUnlock()
+			continue
+		}
+		if len(state.subscribers) == 0 {
+			a.mu.RUnlock()
+			a.mu.Lock()
+			if current, exists := a.sessions[sessionID]; exists {
+				current.historyFollowActive = false
+			}
+			a.mu.Unlock()
+			return
+		}
+		path := state.historyPath
+		offset := state.historyOffset
+		a.mu.RUnlock()
+
+		if path == "" {
+			a.mu.Lock()
+			if current, exists := a.sessions[sessionID]; exists {
+				current.historyFollowActive = false
+			}
+			a.mu.Unlock()
+			return
+		}
+
+		events, nextOffset, err := readHistoryAppendedEvents(path, sessionID, offset)
+		if err != nil {
+			continue
+		}
+		if nextOffset != offset {
+			a.mu.Lock()
+			if current, exists := a.sessions[sessionID]; exists {
+				current.historyOffset = nextOffset
+			}
+			a.mu.Unlock()
+		}
+		for _, ev := range events {
+			a.appendHistoryMessage(sessionID, ev.role, ev.text)
+		}
+	}
+}
+
+func (a *Adapter) resumeHistoryFollow(sessionID string) {
+	var path string
+	var paused bool
+	a.mu.Lock()
+	if state, ok := a.sessions[sessionID]; ok {
+		paused = state.historyFollowPaused
+		path = state.historyPath
+		state.historyFollowPaused = false
+	}
+	a.mu.Unlock()
+	if !paused || path == "" {
+		return
+	}
+	if size, err := historyFileSize(path); err == nil {
+		a.mu.Lock()
+		if state, ok := a.sessions[sessionID]; ok {
+			state.historyOffset = size
+		}
+		a.mu.Unlock()
+	}
+}
+
+type historyParsedEvent struct {
+	role string
+	text string
+}
+
+func readHistoryAppendedEvents(path, sessionID string, offset int64) ([]historyParsedEvent, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, offset, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, err
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return nil, offset, err
+	}
+	if len(buf) == 0 {
+		return nil, offset, nil
+	}
+
+	data := string(buf)
+	lines := strings.Split(data, "\n")
+	nextOffset := offset + int64(len(buf))
+	if !strings.HasSuffix(data, "\n") {
+		incomplete := lines[len(lines)-1]
+		lines = lines[:len(lines)-1]
+		nextOffset -= int64(len(incomplete))
+	}
+
+	events := make([]historyParsedEvent, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+
+		var item historyLine
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			continue
+		}
+		if item.Type != "response_item" {
+			continue
+		}
+		role, text, ok := extractHistoryMessage(item.Payload)
+		if !ok {
+			continue
+		}
+		if role == "user" && isBootstrapHistoryText(text) {
+			continue
+		}
+		events = append(events, historyParsedEvent{role: role, text: text})
+	}
+
+	return events, nextOffset, nil
+}
+
+func historyFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func readHistorySessionSummary(path string, activeWindow time.Duration) (externalSessionInfo, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return externalSessionInfo{}, false
@@ -856,6 +1123,7 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 	if err != nil {
 		return externalSessionInfo{}, false
 	}
+	modTime := stat.ModTime().UTC()
 
 	var (
 		sessionID string
@@ -865,6 +1133,8 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 		source    string
 		title     string
 	)
+	activeTurns := make(map[string]time.Time)
+	sawTaskEvents := false
 
 	scanner := newJSONLScanner(f)
 	for scanner.Scan() {
@@ -921,6 +1191,27 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 			if candidate != "" {
 				title = candidate
 			}
+		case "event_msg":
+			var evt historyEventMsg
+			if err := json.Unmarshal(item.Payload, &evt); err != nil {
+				continue
+			}
+			eventType := strings.ToLower(strings.TrimSpace(evt.Type))
+			turnID := strings.TrimSpace(evt.TurnID)
+			if eventType == "" || turnID == "" {
+				continue
+			}
+			sawTaskEvents = true
+			switch eventType {
+			case "task_started":
+				activeTurns[turnID] = ts
+			case "task_complete", "task_completed", "turn_aborted", "task_aborted", "task_failed", "task_error":
+				delete(activeTurns, turnID)
+			default:
+				if strings.HasSuffix(eventType, "aborted") || strings.HasSuffix(eventType, "complete") || strings.HasSuffix(eventType, "completed") || strings.HasSuffix(eventType, "failed") || strings.HasSuffix(eventType, "error") {
+					delete(activeTurns, turnID)
+				}
+			}
 		}
 	}
 
@@ -928,7 +1219,10 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 		return externalSessionInfo{}, false
 	}
 	if updatedAt.IsZero() {
-		updatedAt = stat.ModTime().UTC()
+		updatedAt = modTime
+	}
+	if !modTime.IsZero() && modTime.After(updatedAt) {
+		updatedAt = modTime
 	}
 	if createdAt.IsZero() {
 		createdAt = updatedAt
@@ -940,11 +1234,36 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 		title = sessionID
 	}
 
+	hasRecentActiveTurn := false
+	for _, startedAt := range activeTurns {
+		if activeWindow <= 0 {
+			hasRecentActiveTurn = true
+			break
+		}
+		turnTS := startedAt
+		if turnTS.IsZero() {
+			turnTS = updatedAt
+		}
+		if !turnTS.IsZero() && time.Since(turnTS) <= activeWindow {
+			hasRecentActiveTurn = true
+			break
+		}
+	}
+
+	status := sessionStatusIdle
+	if hasRecentActiveTurn {
+		status = sessionStatusRunning
+	} else if !sawTaskEvents && activeWindow > 0 && !updatedAt.IsZero() {
+		if time.Since(updatedAt) <= activeWindow {
+			status = sessionStatusRunning
+		}
+	}
+
 	detail := model.SessionDetail{
 		Adapter:   adapterName,
 		ID:        sessionID,
 		Title:     title,
-		Status:    sessionStatusIdle,
+		Status:    status,
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 		Workspace: workspace,
@@ -964,10 +1283,10 @@ func readHistorySessionSummary(path string) (externalSessionInfo, bool) {
 	}, true
 }
 
-func loadHistorySessionEvents(ctx context.Context, path, sessionID string) ([]model.SessionEvent, error) {
+func loadHistorySessionEvents(ctx context.Context, path, sessionID string) ([]model.SessionEvent, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
@@ -978,7 +1297,7 @@ func loadHistorySessionEvents(ctx context.Context, path, sessionID string) ([]mo
 	scanner := newJSONLScanner(f)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		line := strings.TrimSpace(scanner.Text())
@@ -1041,9 +1360,15 @@ func loadHistorySessionEvents(ctx context.Context, path, sessionID string) ([]mo
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return events, nil
+	offset, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		if stat, statErr := f.Stat(); statErr == nil {
+			offset = stat.Size()
+		}
+	}
+	return events, offset, nil
 }
 
 func extractHistoryMessage(payload json.RawMessage) (string, string, bool) {
@@ -1216,27 +1541,62 @@ func (a *Adapter) emitRealContinueEvents(ctx context.Context, sessionID, prompt 
 
 	deltaCount := 0
 	errLines := make([]string, 0, 8)
+	approvalBlocked := false
+	approvalHintSent := false
+	detectedThreadID := strings.TrimSpace(threadID)
 
 	for item := range lineCh {
 		if item.source == "stderr" {
+			if detectCLIApprovalPromptLine(item.line) {
+				approvalBlocked = true
+				if !approvalHintSent {
+					approvalHintSent = true
+					a.appendAssistantAction(sessionID, "检测到该会话需要人工确认，Web 暂不支持确认交互", map[string]any{
+						"raw_type": "approval_required",
+						"source":   "cli",
+					})
+				}
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				continue
+			}
 			if normalized := normalizeCLIErrorLine(item.line); normalized != "" {
 				errLines = append(errLines, normalized)
 			}
 			continue
 		}
 
-		eventType, chunks, eventErr := parseCLIJSONLine(item.line)
+		eventType, chunks, eventErr, approvalRequired := parseCLIJSONLine(item.line)
 		if eventErr != "" {
 			errLines = append(errLines, eventErr)
 		}
 		if tid := parseCLIThreadID(eventType, item.line); tid != "" {
 			a.setSessionThreadID(sessionID, tid)
+			detectedThreadID = tid
+		}
+		if approvalRequired {
+			approvalBlocked = true
+			if !approvalHintSent {
+				approvalHintSent = true
+				a.appendAssistantAction(sessionID, "检测到该会话需要人工确认，Web 暂不支持确认交互", map[string]any{
+					"raw_type": eventType,
+					"source":   "cli",
+				})
+			}
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			continue
 		}
 		if action := summarizeCLIAction(eventType, item.line); action != "" {
 			a.appendAssistantAction(sessionID, action, map[string]any{
 				"raw_type": eventType,
 				"source":   "cli",
 			})
+		}
+		if approvalBlocked {
+			continue
 		}
 		for _, chunk := range chunks {
 			if ctx.Err() != nil {
@@ -1256,6 +1616,17 @@ func (a *Adapter) emitRealContinueEvents(ctx context.Context, sessionID, prompt 
 	}
 	if ctx.Err() != nil {
 		return streamResult{deltaCount: deltaCount, err: ctx.Err()}
+	}
+	if approvalBlocked {
+		if detectedThreadID == "" {
+			detectedThreadID = a.getSessionThreadID(sessionID)
+		}
+		return streamResult{
+			deltaCount: deltaCount,
+			err: approvalRequiredError{
+				threadID: strings.TrimSpace(detectedThreadID),
+			},
+		}
 	}
 	if waitErr != nil {
 		msg := "codex cli exited with error"
@@ -1334,43 +1705,38 @@ func summarizeCLIAction(eventType, rawLine string) string {
 				return "推理完成"
 			}
 			return "正在推理"
-		case "function_call", "tool_call":
+		case "function_call", "tool_call", "custom_tool_call", "mcp_tool_call":
 			name := firstNonEmptyString(item, "name", "tool_name", "function_name")
-			if name == "" {
-				if completed {
-					return "工具调用完成"
-				}
-				return "正在调用工具"
-			}
 			name = trimRunes(name, 56)
-			if completed {
-				return "工具调用完成: " + name
-			}
-			return "正在调用工具: " + name
+			return formatActionLabel(classifyActionKind(itemType, name, ""), name, completed)
 		case "command_execution":
 			command := trimRunes(firstNonEmptyString(item, "command"), 56)
 			exitCode, hasExitCode := asInt64(item["exit_code"])
 			if completed {
-				if command == "" && hasExitCode {
-					return fmt.Sprintf("命令执行完成 (exit %d)", exitCode)
-				}
 				if command == "" {
-					return "命令执行完成"
+					if hasExitCode {
+						return fmt.Sprintf("Run ✓ (exit %d)", exitCode)
+					}
+					return "Run ✓"
 				}
 				if hasExitCode {
-					return fmt.Sprintf("命令执行完成 (exit %d): %s", exitCode, command)
+					return fmt.Sprintf("Run ✓ (exit %d) · %s", exitCode, command)
 				}
-				return "命令执行完成: " + command
+				return "Run ✓ · " + command
 			}
 			if command == "" {
-				return "正在执行命令"
+				return "Run"
 			}
-			return "正在执行命令: " + command
+			return "Run · " + command
 		case "agent_message", "message":
 			if completed {
 				return "回复片段已生成"
 			}
 			return "正在生成回复片段"
+		}
+		name := trimRunes(firstNonEmptyString(item, "name", "tool_name", "function_name"), 56)
+		if name != "" {
+			return formatActionLabel(classifyActionKind(itemType, name, ""), name, completed)
 		}
 		if !completed {
 			return "正在处理任务项"
@@ -1378,6 +1744,96 @@ func summarizeCLIAction(eventType, rawLine string) string {
 		return "任务项处理完成"
 	}
 	return ""
+}
+
+func formatActionLabel(kind, name string, completed bool) string {
+	kind = strings.TrimSpace(kind)
+	name = strings.TrimSpace(name)
+	if kind == "" {
+		kind = "Called"
+	}
+	if completed {
+		if name == "" {
+			return kind + " ✓"
+		}
+		return kind + " ✓ · " + name
+	}
+	if name == "" {
+		return kind
+	}
+	return kind + " · " + name
+}
+
+func classifyActionKind(itemType, name, command string) string {
+	itemType = strings.ToLower(strings.TrimSpace(itemType))
+	name = strings.ToLower(strings.TrimSpace(name))
+	command = strings.ToLower(strings.TrimSpace(command))
+	if itemType == "command_execution" || command != "" {
+		return "Run"
+	}
+	if isEditedActionName(name) {
+		return "Edited"
+	}
+	if isExploredActionName(name) {
+		return "Explored"
+	}
+	return "Called"
+}
+
+func isEditedActionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	editNeedles := []string{
+		"apply_patch",
+		"update",
+		"edit",
+		"write",
+		"create",
+		"delete",
+		"remove",
+		"rename",
+		"move",
+		"append",
+		"insert",
+		"replace",
+		"modify",
+	}
+	for _, needle := range editNeedles {
+		if strings.Contains(name, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExploredActionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	exploreNeedles := []string{
+		"read",
+		"list",
+		"search",
+		"find",
+		"fetch",
+		"open",
+		"query",
+		"scan",
+		"snapshot",
+		"screenshot",
+		"inspect",
+		"view",
+		"show",
+		"get",
+		"discover",
+	}
+	for _, needle := range exploreNeedles {
+		if strings.Contains(name, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmptyString(node map[string]any, keys ...string) string {
@@ -1496,46 +1952,181 @@ func parseCLIThreadID(eventType, rawLine string) string {
 	return ""
 }
 
-func parseCLIJSONLine(line string) (string, []string, string) {
+func parseCLIJSONLine(line string) (string, []string, string, bool) {
 	var event map[string]any
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
 		if shouldUsePlainLineAsDelta(line) {
-			return "stdout.text", splitDeltaText(line), ""
+			return "stdout.text", splitDeltaText(line), "", detectCLIApprovalPromptLine(line)
 		}
-		return "", nil, ""
+		return "", nil, "", false
 	}
 
 	eventType, _ := event["type"].(string)
+	if detectCLIApprovalPromptEvent(eventType, event) {
+		return eventType, nil, "", true
+	}
 	lowerType := strings.ToLower(strings.TrimSpace(eventType))
 	if strings.Contains(lowerType, "error") {
 		if msg, _ := event["message"].(string); strings.TrimSpace(msg) != "" {
-			return eventType, nil, msg
+			return eventType, nil, msg, false
 		}
 		if errObj, ok := event["error"].(map[string]any); ok {
 			if msg, _ := errObj["message"].(string); strings.TrimSpace(msg) != "" {
-				return eventType, nil, msg
+				return eventType, nil, msg, false
 			}
 		}
-		return eventType, nil, "codex cli returned error event"
+		return eventType, nil, "codex cli returned error event", false
 	}
 	if strings.HasPrefix(lowerType, "thread.") || lowerType == "turn.started" {
-		return eventType, nil, ""
+		return eventType, nil, "", false
 	}
 	if lowerType == "item.completed" {
 		if item, ok := event["item"].(map[string]any); ok {
 			itemType, _ := item["type"].(string)
 			itemType = strings.ToLower(strings.TrimSpace(itemType))
 			if itemType == "reasoning" {
-				return eventType, nil, ""
+				return eventType, nil, "", false
 			}
 			if text, _ := item["text"].(string); strings.TrimSpace(text) != "" {
-				return eventType, splitDeltaText(text), ""
+				return eventType, splitDeltaText(text), "", false
 			}
 		}
 	}
 
 	chunks := extractAssistantChunks(event)
-	return eventType, chunks, ""
+	return eventType, chunks, "", false
+}
+
+func detectCLIApprovalPromptEvent(eventType string, event map[string]any) bool {
+	lowerType := strings.ToLower(strings.TrimSpace(eventType))
+	if strings.Contains(lowerType, "approval") ||
+		strings.Contains(lowerType, "confirm") ||
+		strings.Contains(lowerType, "requires_action") ||
+		strings.Contains(lowerType, "awaiting_input") {
+		return true
+	}
+
+	return detectCLIApprovalPromptNode(event)
+}
+
+func detectCLIApprovalPromptNode(v any) bool {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, raw := range node {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			if isApprovalFieldKey(lowerKey) && isTruthy(raw) {
+				return true
+			}
+			if isStatusFieldKey(lowerKey) {
+				if text, ok := raw.(string); ok && detectCLIApprovalPromptLine(text) {
+					return true
+				}
+			}
+			if detectCLIApprovalPromptNode(raw) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range node {
+			if detectCLIApprovalPromptNode(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isApprovalFieldKey(key string) bool {
+	switch key {
+	case "approval_required", "requires_approval", "needs_approval", "awaiting_approval", "pending_approval":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStatusFieldKey(key string) bool {
+	switch key {
+	case "status", "state", "phase", "reason", "message", "prompt", "detail":
+		return true
+	default:
+		return false
+	}
+}
+
+func detectCLIApprovalPromptLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	normalized := strings.NewReplacer("_", " ", "-", " ").Replace(lower)
+	if strings.Contains(lower, "approval policy is currently never") {
+		return false
+	}
+
+	needles := []string{
+		"awaiting approval",
+		"pending approval",
+		"approval required",
+		"requires approval",
+		"requires user approval",
+		"approve this command",
+		"approve command",
+		"press enter to approve",
+		"approve? (y/n)",
+		"[y/n]",
+		"(y/n)",
+		"等待确认",
+		"需要确认",
+		"需要人工确认",
+		"请确认后继续",
+	}
+	for _, needle := range needles {
+		if strings.Contains(normalized, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTruthy(raw any) bool {
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "y":
+			return true
+		default:
+			return false
+		}
+	case int:
+		return value != 0
+	case int8:
+		return value != 0
+	case int16:
+		return value != 0
+	case int32:
+		return value != 0
+	case int64:
+		return value != 0
+	case uint:
+		return value != 0
+	case uint8:
+		return value != 0
+	case uint16:
+		return value != 0
+	case uint32:
+		return value != 0
+	case uint64:
+		return value != 0
+	case float32:
+		return value != 0
+	case float64:
+		return value != 0
+	default:
+		return false
+	}
 }
 
 func shouldUsePlainLineAsDelta(line string) bool {
@@ -1659,7 +2250,19 @@ func (a *Adapter) appendAssistantAction(sessionID, action string, payload map[st
 func (a *Adapter) appendAssistantFailure(sessionID string, err error) {
 	msg := "continue 执行失败"
 	if err != nil {
-		msg = msg + ": " + err.Error()
+		var approvalErr approvalRequiredError
+		if errors.As(err, &approvalErr) {
+			targetThread := strings.TrimSpace(approvalErr.threadID)
+			if targetThread == "" {
+				targetThread = strings.TrimSpace(a.getSessionThreadID(sessionID))
+			}
+			if targetThread == "" {
+				targetThread = strings.TrimSpace(sessionID)
+			}
+			msg = "该会话需要人工确认命令，但 Web 端当前不支持确认交互。请在命令行执行 `codex resume " + targetThread + "` 完成确认后再回到 Web，或新建会话继续。"
+		} else {
+			msg = msg + ": " + err.Error()
+		}
 	}
 	a.appendAssistantDone(sessionID, msg, map[string]any{
 		"raw_type": "assistant_error",
@@ -1683,6 +2286,34 @@ func (a *Adapter) appendUserEvent(sessionID, text string) {
 		"done": true,
 	}
 	a.appendEvent(sessionID, "message.user", payload, normalized)
+}
+
+func (a *Adapter) appendHistoryMessage(sessionID, role, text string) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	text = strings.TrimSpace(text)
+	if role == "" || text == "" {
+		return
+	}
+	payload := map[string]any{
+		"raw_type": "history_message",
+		"source":   defaultHistorySource,
+		"text":     text,
+	}
+	normalized := map[string]any{
+		"role": role,
+		"text": text,
+		"done": true,
+	}
+	eventType := "message.done"
+	if role == "user" {
+		eventType = "message.user"
+	}
+	a.appendEvent(sessionID, eventType, payload, normalized)
+	if role == "user" {
+		a.setSessionStatus(sessionID, sessionStatusRunning)
+	} else if role == "assistant" {
+		a.setSessionStatus(sessionID, sessionStatusIdle)
+	}
 }
 
 func (a *Adapter) appendEvent(sessionID, eventType string, payload, normalized map[string]any) {
@@ -1898,6 +2529,63 @@ func loadHistoryOptions() (enabled bool, historyDir string, ttl time.Duration) {
 		}
 	}
 	return enabled, historyDir, ttl
+}
+
+func loadHistoryActiveWindow() time.Duration {
+	window := defaultHistoryWindow
+	if raw := strings.TrimSpace(os.Getenv("CODEX_HISTORY_ACTIVE_WINDOW_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil {
+			if ms <= 0 {
+				return 0
+			}
+			window = time.Duration(ms) * time.Millisecond
+		}
+	}
+	return window
+}
+
+func loadHistoryTailInterval() time.Duration {
+	interval := defaultHistoryTail
+	if raw := strings.TrimSpace(os.Getenv("CODEX_HISTORY_TAIL_INTERVAL_MS")); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil {
+			if ms <= 0 {
+				return 0
+			}
+			interval = time.Duration(ms) * time.Millisecond
+		}
+	}
+	return interval
+}
+
+func isHistoryBackedSession(detail model.SessionDetail) bool {
+	if detail.Metadata == nil {
+		return false
+	}
+	if origin, ok := detail.Metadata["origin"].(string); ok {
+		if strings.EqualFold(strings.TrimSpace(origin), "codex_history") {
+			return true
+		}
+	}
+	if _, ok := detail.Metadata["rollout_path"]; ok {
+		return true
+	}
+	return false
+}
+
+func applyHistoryDetail(detail *model.SessionDetail, info externalSessionInfo) {
+	detail.Status = normalizeSessionStatus(info.detail.Status)
+	if info.detail.UpdatedAt.After(detail.UpdatedAt) {
+		detail.UpdatedAt = info.detail.UpdatedAt
+	}
+	if detail.Title == "" || detail.Title == detail.ID {
+		detail.Title = info.detail.Title
+	}
+	if detail.Workspace == "" {
+		detail.Workspace = info.detail.Workspace
+	}
+	if detail.Source == "" {
+		detail.Source = info.detail.Source
+	}
 }
 
 func parseBoolEnv(key string, fallback bool) bool {

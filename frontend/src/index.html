@@ -7,83 +7,237 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="background-grid" aria-hidden="true"></div>
-    <main class="layout">
-      <header class="hero">
-        <h1>Agent Session Web Gateway</h1>
-        <p>统一会话视图 · Codex Adapter MVP</p>
+    <div class="aurora" aria-hidden="true"></div>
+    <div class="noise" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">AI</div>
+          <div>
+            <h1 id="app-brand-title">Agent Session Gateway</h1>
+            <p id="app-brand-subtitle">AI-Native Control Surface</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button id="theme-toggle" type="button" class="btn btn-ghost" data-icon="◐">亮色模式</button>
+          <button id="im-sessions-toggle" type="button" class="btn btn-ghost" data-icon="≡">会话面板</button>
+          <button id="im-settings-toggle" type="button" class="btn btn-ghost" data-icon="⚙">连接设置</button>
+          <button id="mobile-more-toggle" type="button" class="btn btn-ghost" data-icon="⋯" aria-expanded="false">更多</button>
+        </div>
       </header>
+      <div id="mobile-quick-menu" class="mobile-quick-menu is-hidden" aria-hidden="true">
+        <button id="mobile-action-sessions" type="button" class="btn btn-ghost mobile-quick-action" data-icon="≡">会话列表</button>
+        <button id="mobile-action-create" type="button" class="btn btn-ghost mobile-quick-action" data-icon="＋">创建会话</button>
+        <button id="mobile-action-editor" type="button" class="btn btn-ghost mobile-quick-action" data-icon="✎">编辑会话</button>
+        <button id="mobile-action-reconnect" type="button" class="btn btn-ghost mobile-quick-action" data-icon="↺">重连流</button>
+        <button id="mobile-action-delete" type="button" class="btn btn-danger mobile-quick-action" data-icon="×">删除会话</button>
+        <button id="mobile-action-settings" type="button" class="btn btn-ghost mobile-quick-action" data-icon="⚙">连接设置</button>
+      </div>
 
-      <section class="panel" id="settings-panel">
-        <div class="panel-title-row">
-          <h2>连接设置</h2>
-          <p id="settings-status" class="status-text">等待配置</p>
-        </div>
-        <form id="settings-form" class="settings-grid">
-          <label>
-            <span>api_base_url</span>
-            <input id="api-base-url" type="url" required placeholder="http://127.0.0.1:8080" />
-          </label>
-          <label>
-            <span>ws_base_url</span>
-            <input id="ws-base-url" type="url" required placeholder="ws://127.0.0.1:8080" />
-          </label>
-          <label>
-            <span>default_adapter</span>
-            <input id="default-adapter" type="text" required placeholder="codex" />
-          </label>
-          <div class="action-row">
-            <button type="submit" class="btn">保存配置</button>
-            <button type="button" id="test-connection" class="btn btn-outline">连接测试</button>
-            <button type="button" id="reset-defaults" class="btn btn-ghost">恢复默认</button>
-          </div>
-        </form>
-      </section>
-
-      <section class="panel panel-sessions">
-        <div class="panel-title-row">
-          <h2>会话</h2>
-          <div class="session-actions">
-            <label>
-              <span>Adapter</span>
-              <select id="adapter-select"></select>
-            </label>
-            <button id="reload-sessions" class="btn btn-outline" type="button">刷新列表</button>
-          </div>
-        </div>
-
-        <div class="session-body">
-          <aside>
-            <form id="create-session-form" class="create-session-form">
-              <h3>新建会话</h3>
-              <input id="create-session-title" type="text" placeholder="title（可选）" />
-              <input id="create-session-workspace" type="text" placeholder="workspace（可选）" />
-              <textarea id="create-session-seed" rows="2" placeholder="seed_prompt（可选）"></textarea>
-              <button type="submit" class="btn">创建并进入</button>
-              <p id="create-session-status" class="status-text">等待创建</p>
-            </form>
-            <ul id="session-list" class="session-list"></ul>
-          </aside>
-
-          <article class="session-detail">
-            <h3 id="session-title">未选择会话</h3>
-            <p id="session-meta" class="meta-line">请选择左侧会话</p>
-            <div class="stream-row">
-              <p id="stream-status" class="status-text">WS 未连接</p>
-              <button id="reconnect-stream" type="button" class="btn btn-ghost">重连流</button>
+      <main class="workspace">
+        <aside class="sidebar" id="session-sidebar">
+          <div class="sidebar-header">
+            <div>
+              <h2>会话索引</h2>
+              <p id="running-sessions-summary" class="status-text">进行中: 0</p>
             </div>
-            <section id="chat-thread" class="chat-thread" aria-live="polite"></section>
+            <div class="session-actions">
+              <label>
+                <span>Adapter</span>
+                <select id="adapter-select"></select>
+              </label>
+              <button id="reload-sessions" class="btn btn-outline" type="button" data-icon="↻">刷新</button>
+            </div>
+          </div>
 
-            <form id="continue-form" class="continue-form">
-              <textarea id="continue-prompt" rows="3" required placeholder="输入继续会话的提示词"></textarea>
-              <div class="continue-actions">
-                <button id="continue-submit" type="submit" class="btn">Continue</button>
+          <div class="session-filter-box">
+            <input id="session-search" type="search" placeholder="搜索 ID / 名称 / 备注 / 类型" />
+            <select id="session-type-filter">
+              <option value="">全部类型</option>
+            </select>
+          </div>
+
+          <form id="create-session-form" class="create-session-form">
+            <h3>新建会话</h3>
+            <input id="create-session-title" type="text" placeholder="title（可选）" />
+            <input id="create-session-workspace" type="text" placeholder="workspace（可选）" />
+            <textarea id="create-session-seed" rows="2" placeholder="seed_prompt（可选）"></textarea>
+            <button type="submit" class="btn" data-icon="＋">创建并进入</button>
+            <p id="create-session-status" class="status-text">等待创建</p>
+          </form>
+
+          <ul id="session-list" class="session-list"></ul>
+        </aside>
+
+        <section class="conversation">
+          <header class="conversation-head">
+            <div class="session-detail-title-row" id="session-title-row">
+              <h3 id="session-title">未选择会话</h3>
+              <button id="delete-session-button" type="button" class="btn btn-danger" data-icon="×">删除会话</button>
+            </div>
+            <p id="session-meta" class="meta-line">请选择左侧会话</p>
+            <p id="session-id-line" class="meta-line">session_id: -</p>
+
+            <form id="session-editor-form" class="session-editor-form">
+              <div class="session-editor-head">
+                <h4>会话信息编辑</h4>
+                <button
+                  id="session-editor-toggle"
+                  type="button"
+                  class="btn btn-outline session-editor-toggle"
+                  data-icon="▾"
+                  aria-expanded="false"
+                  aria-controls="session-editor-body"
+                >
+                  编辑会话信息
+                </button>
+              </div>
+              <div id="session-editor-body" class="session-editor-body is-collapsed">
+                <div class="session-editor-grid">
+                  <label>
+                    <span>会话名称</span>
+                    <input id="session-edit-title" type="text" placeholder="自定义名称" />
+                  </label>
+                  <label>
+                    <span>会话类型（可自定义）</span>
+                    <input id="session-edit-type" type="text" list="session-type-options" placeholder="项目 / 需求 / bug修复" />
+                  </label>
+                  <label class="session-editor-note">
+                    <span>备注</span>
+                    <textarea id="session-edit-note" rows="2" placeholder="记录会话上下文和决策"></textarea>
+                  </label>
+                </div>
+                <datalist id="session-type-options">
+                  <option value="项目"></option>
+                  <option value="需求"></option>
+                  <option value="bug修复"></option>
+                  <option value="问题拆解"></option>
+                </datalist>
+                <div class="session-editor-actions">
+                  <button id="session-editor-save" type="submit" class="btn btn-outline" data-icon="✓">保存信息</button>
+                  <button id="session-editor-reset" type="button" class="btn btn-ghost" data-icon="⟲">清空自定义</button>
+                  <p id="session-editor-status" class="status-text">未编辑</p>
+                </div>
               </div>
             </form>
-          </article>
+
+            <div class="stream-row">
+              <p id="stream-status" class="status-text">WS 未连接</p>
+              <button id="reconnect-stream" type="button" class="btn btn-ghost" data-icon="↺">重连流</button>
+            </div>
+          </header>
+
+          <div class="chat-shell">
+            <section class="chat-main">
+              <section id="chat-thread" class="chat-thread" aria-live="polite"></section>
+              <div class="chat-scroll-nav" aria-label="消息导航">
+                <button id="chat-jump-top" type="button" class="btn btn-ghost" data-icon="↑" aria-label="顶部">顶部</button>
+                <button id="chat-jump-bottom" type="button" class="btn btn-ghost" data-icon="↓" aria-label="底部">底部</button>
+              </div>
+            </section>
+            <aside class="tool-insights">
+              <div class="tool-insights-head">
+                <h4>工具轨迹</h4>
+                <p class="status-text">最近 24 条动作</p>
+              </div>
+              <ul id="tool-event-list" class="tool-event-list"></ul>
+            </aside>
+          </div>
+          <div class="continue-shortcuts">
+            <p class="status-text">Enter 发送 / Shift+Enter 换行 / Esc 关闭面板</p>
+          </div>
+          <form id="continue-form" class="continue-form">
+            <textarea id="continue-prompt" rows="3" required placeholder="输入提示词，Enter 发送，Shift+Enter 换行"></textarea>
+            <div class="continue-actions">
+              <button id="continue-submit" type="submit" class="btn" data-icon="➤" aria-label="发送消息">Continue</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <section class="settings-panel is-collapsed" id="settings-panel">
+      <div class="settings-panel-head">
+        <h2>连接设置</h2>
+        <p id="settings-status" class="status-text">等待配置</p>
+      </div>
+      <div class="settings-tabs" role="tablist" aria-label="设置标签">
+        <button type="button" class="settings-tab is-active" data-settings-tab="connection">
+          <span class="settings-tab-index">01</span>
+          <span class="settings-tab-text">连接</span>
+        </button>
+        <button type="button" class="settings-tab" data-settings-tab="session">
+          <span class="settings-tab-index">02</span>
+          <span class="settings-tab-text">会话</span>
+        </button>
+        <button type="button" class="settings-tab" data-settings-tab="stream">
+          <span class="settings-tab-index">03</span>
+          <span class="settings-tab-text">流状态</span>
+        </button>
+      </div>
+      <form id="settings-form" class="settings-grid">
+        <section class="settings-tab-panel is-active" data-settings-panel="connection">
+          <div class="settings-grid-inner settings-grid-connection">
+            <label class="settings-field settings-field-wide">
+              <span>api_base_url</span>
+              <input id="api-base-url" type="url" required placeholder="http://127.0.0.1:8082" />
+              <small class="field-hint">用于 REST API 请求，例如 `/api/v1/health`。</small>
+            </label>
+            <label class="settings-field settings-field-wide">
+              <span>ws_base_url</span>
+              <input id="ws-base-url" type="url" required placeholder="ws://127.0.0.1:8082" />
+              <small class="field-hint">用于 WebSocket 事件流连接。</small>
+            </label>
+            <label class="settings-field settings-field-compact">
+              <span>default_adapter</span>
+              <input id="default-adapter" type="text" required placeholder="codex" />
+              <small class="field-hint">默认会话适配器名称。</small>
+            </label>
+          </div>
+          <div class="action-row connection-actions">
+            <button type="submit" class="btn" data-icon="✓">保存配置</button>
+            <button type="button" id="test-connection" class="btn btn-outline" data-icon="◎">连接测试</button>
+            <button type="button" id="reset-defaults" class="btn btn-ghost" data-icon="⟲">恢复默认</button>
+          </div>
+        </section>
+        <section class="settings-tab-panel" data-settings-panel="session">
+          <div class="settings-note-grid">
+            <article>
+              <h3>当前上下文</h3>
+              <p id="settings-selected-adapter" class="status-text">adapter: -</p>
+              <p id="settings-selected-session" class="status-text">session: -</p>
+            </article>
+            <article>
+              <h3>交互规范</h3>
+              <p class="status-text">1. Enter 发送，Shift+Enter 换行</p>
+              <p class="status-text">2. 删除会话前会二次确认</p>
+              <p class="status-text">3. 会话状态由流事件实时驱动</p>
+            </article>
+          </div>
+        </section>
+        <section class="settings-tab-panel" data-settings-panel="stream">
+          <div class="settings-note-grid">
+            <article>
+              <h3>流连接</h3>
+              <p id="settings-stream-mode" class="status-text">状态: 未连接</p>
+              <p id="settings-stream-attempts" class="status-text">重连次数: 0</p>
+            </article>
+            <article>
+              <h3>说明</h3>
+              <p class="status-text">若外部会话运行，本页面会通过轮询 + WS 事件更新状态。</p>
+              <p class="status-text">点击“重连流”可手动重建链路。</p>
+            </article>
+          </div>
+        </section>
+        <div class="action-row settings-close-row">
+          <button type="button" id="settings-close" class="btn btn-ghost" data-icon="←">关闭设置</button>
         </div>
-      </section>
-    </main>
+      </form>
+    </section>
+
+    <div id="settings-backdrop" class="overlay-backdrop is-hidden" aria-hidden="true"></div>
+    <div id="sidebar-backdrop" class="overlay-backdrop is-hidden" aria-hidden="true"></div>
 
     <script type="module" src="/app.js"></script>
   </body>

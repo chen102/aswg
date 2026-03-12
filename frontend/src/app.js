@@ -1,4 +1,11 @@
 const STORAGE_KEY = "aswg_runtime_config_v1";
+const THEME_STORAGE_KEY = "aswg_theme";
+const SESSION_EDITOR_COLLAPSE_KEY = "aswg_session_editor_collapsed";
+const APP_BRAND_TITLE_DEFAULT = "Agent Session Gateway";
+const APP_BRAND_SUBTITLE_DEFAULT = "AI-Native Control Surface";
+const SESSION_POLL_INTERVAL_MS = 3000;
+const DEFAULT_SESSION_TYPES = ["项目", "需求", "bug修复", "问题拆解"];
+const MOBILE_VIEWS = new Set(["chat", "sessions", "create", "editor"]);
 
 const state = {
   defaults: null,
@@ -13,11 +20,42 @@ const state = {
   continuePending: false,
   wsReconnectTimer: null,
   wsReconnectAttempts: 0,
+  sessionsPollTimer: null,
+  sessionsPollInFlight: false,
+  sessionMetaStore: {},
+  sessionSearch: "",
+  sessionTypeFilter: "",
+  streamStatusText: "WS 未连接",
+  streamStatusError: false,
+  theme: "dark",
+  sessionEditorCollapsed: true,
+  mobileView: "chat",
 };
 
 const el = {
+  brandTitle: document.getElementById("app-brand-title"),
+  brandSubtitle: document.getElementById("app-brand-subtitle"),
+  mobileMoreToggle: document.getElementById("mobile-more-toggle"),
+  mobileQuickMenu: document.getElementById("mobile-quick-menu"),
+  mobileActionSessions: document.getElementById("mobile-action-sessions"),
+  mobileActionCreate: document.getElementById("mobile-action-create"),
+  mobileActionEditor: document.getElementById("mobile-action-editor"),
+  mobileActionReconnect: document.getElementById("mobile-action-reconnect"),
+  mobileActionDelete: document.getElementById("mobile-action-delete"),
+  mobileActionSettings: document.getElementById("mobile-action-settings"),
+  themeToggle: document.getElementById("theme-toggle"),
+  settingsPanel: document.getElementById("settings-panel"),
+  settingsToggle: document.getElementById("im-settings-toggle"),
+  settingsClose: document.getElementById("settings-close"),
+  settingsBackdrop: document.getElementById("settings-backdrop"),
   settingsForm: document.getElementById("settings-form"),
   settingsStatus: document.getElementById("settings-status"),
+  settingsTabs: Array.from(document.querySelectorAll("[data-settings-tab]")),
+  settingsPanels: Array.from(document.querySelectorAll("[data-settings-panel]")),
+  settingsSelectedAdapter: document.getElementById("settings-selected-adapter"),
+  settingsSelectedSession: document.getElementById("settings-selected-session"),
+  settingsStreamMode: document.getElementById("settings-stream-mode"),
+  settingsStreamAttempts: document.getElementById("settings-stream-attempts"),
   apiBaseURL: document.getElementById("api-base-url"),
   wsBaseURL: document.getElementById("ws-base-url"),
   defaultAdapter: document.getElementById("default-adapter"),
@@ -30,15 +68,38 @@ const el = {
   createSessionWorkspace: document.getElementById("create-session-workspace"),
   createSessionSeed: document.getElementById("create-session-seed"),
   createSessionStatus: document.getElementById("create-session-status"),
+  sessionsToggle: document.getElementById("im-sessions-toggle"),
+  sessionSidebar: document.getElementById("session-sidebar"),
+  sidebarBackdrop: document.getElementById("sidebar-backdrop"),
+  runningSummary: document.getElementById("running-sessions-summary"),
+  sessionSearch: document.getElementById("session-search"),
+  sessionTypeFilter: document.getElementById("session-type-filter"),
   sessionList: document.getElementById("session-list"),
   sessionTitle: document.getElementById("session-title"),
   sessionMeta: document.getElementById("session-meta"),
+  sessionIDLine: document.getElementById("session-id-line"),
+  sessionEditorForm: document.getElementById("session-editor-form"),
+  sessionEditTitle: document.getElementById("session-edit-title"),
+  sessionEditType: document.getElementById("session-edit-type"),
+  sessionEditNote: document.getElementById("session-edit-note"),
+  sessionTypeOptions: document.getElementById("session-type-options"),
+  sessionEditorToggle: document.getElementById("session-editor-toggle"),
+  sessionEditorBody: document.getElementById("session-editor-body"),
+  sessionEditorSave: document.getElementById("session-editor-save"),
+  sessionEditorReset: document.getElementById("session-editor-reset"),
+  sessionEditorStatus: document.getElementById("session-editor-status"),
+  conversation: document.querySelector(".conversation"),
+  conversationHead: document.querySelector(".conversation-head"),
   chatThread: document.getElementById("chat-thread"),
+  toolEventList: document.getElementById("tool-event-list"),
   continueForm: document.getElementById("continue-form"),
   continuePrompt: document.getElementById("continue-prompt"),
   continueSubmit: document.getElementById("continue-submit"),
   streamStatus: document.getElementById("stream-status"),
   reconnectStream: document.getElementById("reconnect-stream"),
+  deleteSessionButton: document.getElementById("delete-session-button"),
+  chatJumpTop: document.getElementById("chat-jump-top"),
+  chatJumpBottom: document.getElementById("chat-jump-bottom"),
 };
 
 bootstrap().catch((err) => {
@@ -52,14 +113,380 @@ async function bootstrap() {
   state.config = { ...defaults, ...saved };
 
   applyConfigToForm(state.config);
+  initTheme();
+  syncViewportModeClass();
+  initSessionEditorCollapse();
+  refreshSessionTypeControls();
+  switchSettingsTab("connection");
   bindEvents();
+  bindChatNavigation();
+  toggleSettingsPanel(false);
+  toggleSidebar(false);
+  setStreamStatus("WS 未连接", false);
 
   await refreshAdapters();
   await refreshSessions();
   await restoreSelectedSession();
+  ensureSessionPolling();
+  updateSettingsContext();
+  updateDeleteSessionButtonState();
+}
+
+function normalizeSessionStatus(value) {
+  return String(value || "").trim().toLowerCase() === "running" ? "running" : "idle";
+}
+
+function sessionStatusLabel(status) {
+  return status === "running" ? "进行中" : "空闲";
+}
+
+function isMobileViewport() {
+  return window.matchMedia("(max-width: 1024px)").matches;
+}
+
+function syncViewportModeClass() {
+  const mobile = isMobileViewport();
+  document.body.classList.toggle("viewport-mobile", mobile);
+  document.body.classList.toggle("viewport-desktop", !mobile);
+  if (!mobile) {
+    document.body.classList.remove("sidebar-open");
+    toggleMobileQuickMenu(false);
+    toggleMobileSubpageBackdrop(false);
+    document.body.classList.remove("mobile-view-chat", "mobile-view-sessions", "mobile-view-create", "mobile-view-editor");
+    state.mobileView = "chat";
+  } else {
+    if (!MOBILE_VIEWS.has(state.mobileView)) {
+      state.mobileView = "chat";
+    }
+    applyMobileViewClass();
+  }
+  updateMobileBrand();
+}
+
+function applyMobileViewClass() {
+  const active = MOBILE_VIEWS.has(state.mobileView) ? state.mobileView : "chat";
+  document.body.classList.toggle("mobile-view-chat", active === "chat");
+  document.body.classList.toggle("mobile-view-sessions", active === "sessions");
+  document.body.classList.toggle("mobile-view-create", active === "create");
+  document.body.classList.toggle("mobile-view-editor", active === "editor");
+}
+
+function toggleMobileSubpageBackdrop(forceOpen) {
+  if (!el.sidebarBackdrop) {
+    return;
+  }
+  if (!isMobileViewport()) {
+    const nextOpen = Boolean(forceOpen);
+    el.sidebarBackdrop.classList.toggle("is-hidden", !nextOpen);
+    el.sidebarBackdrop.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+    return;
+  }
+  // Mobile subpages are rendered as full-screen sheets inside .app-shell.
+  // Keep external backdrop hidden; otherwise it sits above .app-shell and blocks taps.
+  el.sidebarBackdrop.classList.add("is-hidden");
+  el.sidebarBackdrop.setAttribute("aria-hidden", "true");
+}
+
+function setMobileView(nextView) {
+  if (!isMobileViewport()) {
+    return;
+  }
+  state.mobileView = MOBILE_VIEWS.has(nextView) ? nextView : "chat";
+  document.body.classList.remove("sidebar-open");
+  if (el.sessionsToggle) {
+    el.sessionsToggle.setAttribute("aria-expanded", state.mobileView === "sessions" ? "true" : "false");
+  }
+  if (state.mobileView === "editor") {
+    setSessionEditorCollapsed(false, false);
+  } else {
+    setSessionEditorCollapsed(true, false);
+  }
+  applyMobileViewClass();
+  toggleMobileSubpageBackdrop(state.mobileView !== "chat");
+  updateMobileBrand();
+}
+
+function toggleMobileQuickMenu(forceOpen) {
+  if (!el.mobileQuickMenu) {
+    return;
+  }
+  const nextOpen = typeof forceOpen === "boolean" ? forceOpen : el.mobileQuickMenu.classList.contains("is-hidden");
+  el.mobileQuickMenu.classList.toggle("is-hidden", !nextOpen);
+  el.mobileQuickMenu.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+  if (el.mobileMoreToggle) {
+    el.mobileMoreToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  }
+}
+
+function syncMobileTopbarHeight() {
+  if (!document.body.classList.contains("viewport-mobile")) {
+    document.body.style.removeProperty("--mobile-topbar-height");
+    return;
+  }
+  const topbar = document.querySelector(".topbar");
+  if (!topbar) {
+    return;
+  }
+  const height = Math.ceil(topbar.getBoundingClientRect().height);
+  if (height > 0) {
+    document.body.style.setProperty("--mobile-topbar-height", `${height}px`);
+  }
+}
+
+function updateMobileBrand() {
+  if (!el.brandTitle || !el.brandSubtitle) {
+    return;
+  }
+  if (!document.body.classList.contains("viewport-mobile")) {
+    el.brandTitle.textContent = APP_BRAND_TITLE_DEFAULT;
+    el.brandSubtitle.textContent = APP_BRAND_SUBTITLE_DEFAULT;
+    syncMobileTopbarHeight();
+    return;
+  }
+
+  if (state.mobileView === "sessions") {
+    const adapter = currentAdapter();
+    el.brandTitle.textContent = "会话列表";
+    el.brandSubtitle.textContent = `${adapter || "-"} · ${state.sessions.length} 个会话`;
+    syncMobileTopbarHeight();
+    return;
+  }
+
+  if (state.mobileView === "create") {
+    const adapter = currentAdapter();
+    el.brandTitle.textContent = "创建会话";
+    el.brandSubtitle.textContent = adapter ? `${adapter} · 新会话` : "新会话";
+    syncMobileTopbarHeight();
+    return;
+  }
+
+  if (state.mobileView === "editor") {
+    const adapter = currentAdapter();
+    const sessionID = String(state.selectedSessionID || "").trim();
+    const session = sessionID ? state.sessions.find((item) => item.id === sessionID) : null;
+    const meta = sessionID ? getSessionMeta(adapter, sessionID) : { title: "" };
+    const title = String(meta.title || "").trim() || String(session?.title || "").trim() || sessionID || "未选择会话";
+    el.brandTitle.textContent = "编辑会话";
+    el.brandSubtitle.textContent = title;
+    syncMobileTopbarHeight();
+    return;
+  }
+
+  const adapter = currentAdapter();
+  const sessionID = String(state.selectedSessionID || "").trim();
+  if (!sessionID) {
+    el.brandTitle.textContent = "未选择会话";
+    el.brandSubtitle.textContent = adapter ? `${adapter} · 请选择会话` : "请选择会话";
+    syncMobileTopbarHeight();
+    return;
+  }
+
+  const session = state.sessions.find((item) => item.id === sessionID);
+  const meta = getSessionMeta(adapter, sessionID);
+  const title = String(meta.title || "").trim() || String(session?.title || "").trim() || sessionID;
+  const status = normalizeSessionStatus(session?.status);
+
+  el.brandTitle.textContent = title;
+  el.brandSubtitle.textContent = `${sessionStatusLabel(status)} · ${adapter || "-"}`;
+  syncMobileTopbarHeight();
+}
+
+function toggleSettingsPanel(forceOpen) {
+  if (!el.settingsPanel) {
+    return;
+  }
+  const nextOpen = typeof forceOpen === "boolean" ? forceOpen : el.settingsPanel.classList.contains("is-collapsed");
+  if (nextOpen) {
+    toggleMobileQuickMenu(false);
+  }
+  if (nextOpen && isMobileViewport()) {
+    if (state.mobileView !== "chat") {
+      setMobileView("chat");
+    }
+    document.body.classList.remove("sidebar-open");
+    toggleMobileSubpageBackdrop(false);
+    if (el.sessionsToggle) {
+      el.sessionsToggle.setAttribute("aria-expanded", "false");
+    }
+  }
+  el.settingsPanel.classList.toggle("is-collapsed", !nextOpen);
+  el.settingsPanel.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+  if (el.settingsToggle) {
+    el.settingsToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  }
+  if (el.settingsBackdrop) {
+    el.settingsBackdrop.classList.toggle("is-hidden", !nextOpen);
+    el.settingsBackdrop.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+  }
+  if (!nextOpen && isMobileViewport()) {
+    toggleMobileSubpageBackdrop(state.mobileView !== "chat");
+  }
+}
+
+function toggleSidebar(forceOpen) {
+  if (!el.sessionSidebar) {
+    return;
+  }
+  if (!isMobileViewport()) {
+    document.body.classList.remove("sidebar-open");
+    toggleMobileSubpageBackdrop(false);
+    return;
+  }
+
+  const currentlyOpen = state.mobileView === "sessions";
+  const nextOpen = typeof forceOpen === "boolean" ? forceOpen : !currentlyOpen;
+  if (nextOpen && el.settingsPanel && !el.settingsPanel.classList.contains("is-collapsed")) {
+    toggleSettingsPanel(false);
+  }
+  toggleMobileQuickMenu(false);
+  setMobileView(nextOpen ? "sessions" : "chat");
+  document.body.classList.remove("sidebar-open");
+  if (el.sessionsToggle) {
+    el.sessionsToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  }
 }
 
 function bindEvents() {
+  if (el.themeToggle) {
+    el.themeToggle.addEventListener("click", () => {
+      const next = state.theme === "light" ? "dark" : "light";
+      applyTheme(next);
+      saveTheme(next);
+    });
+  }
+
+  if (el.mobileMoreToggle) {
+    el.mobileMoreToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleMobileQuickMenu();
+    });
+  }
+
+  if (el.mobileActionSessions) {
+    el.mobileActionSessions.addEventListener("click", () => {
+      toggleMobileQuickMenu(false);
+      toggleSettingsPanel(false);
+      setMobileView("sessions");
+    });
+  }
+
+  if (el.mobileActionCreate) {
+    el.mobileActionCreate.addEventListener("click", () => {
+      toggleMobileQuickMenu(false);
+      toggleSettingsPanel(false);
+      setMobileView("create");
+    });
+  }
+
+  if (el.mobileActionEditor) {
+    el.mobileActionEditor.addEventListener("click", () => {
+      toggleMobileQuickMenu(false);
+      toggleSettingsPanel(false);
+      if (!state.selectedSessionID) {
+        setStreamStatus("请先选择会话", true);
+        return;
+      }
+      setMobileView("editor");
+    });
+  }
+
+  if (el.mobileActionReconnect) {
+    el.mobileActionReconnect.addEventListener("click", async () => {
+      toggleMobileQuickMenu(false);
+      setMobileView("chat");
+      await connectStream();
+    });
+  }
+
+  if (el.mobileActionDelete) {
+    el.mobileActionDelete.addEventListener("click", async () => {
+      toggleMobileQuickMenu(false);
+      setMobileView("chat");
+      await deleteCurrentSession();
+    });
+  }
+
+  if (el.mobileActionSettings) {
+    el.mobileActionSettings.addEventListener("click", () => {
+      toggleMobileQuickMenu(false);
+      if (isMobileViewport()) {
+        setMobileView("chat");
+      }
+      toggleSettingsPanel(true);
+    });
+  }
+
+  if (el.settingsToggle) {
+    el.settingsToggle.addEventListener("click", () => {
+      toggleSettingsPanel();
+    });
+  }
+
+  if (el.settingsClose) {
+    el.settingsClose.addEventListener("click", () => {
+      toggleSettingsPanel(false);
+    });
+  }
+
+  if (el.settingsBackdrop) {
+    el.settingsBackdrop.addEventListener("click", () => {
+      toggleSettingsPanel(false);
+    });
+  }
+
+  el.settingsTabs.forEach((tabButton) => {
+    tabButton.addEventListener("click", () => {
+      switchSettingsTab(tabButton.dataset.settingsTab || "connection");
+    });
+  });
+
+  if (el.sessionsToggle) {
+    el.sessionsToggle.addEventListener("click", () => {
+      toggleSidebar();
+    });
+  }
+
+  if (el.sidebarBackdrop) {
+    el.sidebarBackdrop.addEventListener("click", () => {
+      if (isMobileViewport()) {
+        setMobileView("chat");
+        return;
+      }
+      toggleSidebar(false);
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    syncViewportModeClass();
+    if (!isMobileViewport()) {
+      toggleSidebar(false);
+      toggleSettingsPanel(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    toggleMobileQuickMenu(false);
+    toggleSettingsPanel(false);
+    toggleSidebar(false);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!el.mobileQuickMenu || !el.mobileMoreToggle) {
+      return;
+    }
+    if (el.mobileQuickMenu.classList.contains("is-hidden")) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Node && (el.mobileQuickMenu.contains(target) || el.mobileMoreToggle.contains(target))) {
+      return;
+    }
+    toggleMobileQuickMenu(false);
+  });
+
   el.settingsForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -102,12 +529,36 @@ function bindEvents() {
   el.adapterSelect.addEventListener("change", async () => {
     await refreshSessions();
     await restoreSelectedSession();
+    updateSettingsContext();
   });
 
   el.reloadSessions.addEventListener("click", async () => {
     await refreshSessions();
     await restoreSelectedSession();
+    updateSettingsContext();
   });
+
+  if (el.sessionSearch) {
+    el.sessionSearch.addEventListener("input", async () => {
+      state.sessionSearch = String(el.sessionSearch.value || "").trim();
+      await ensureSelectedSessionVisible();
+      renderSessionList();
+    });
+  }
+
+  if (el.sessionTypeFilter) {
+    el.sessionTypeFilter.addEventListener("change", async () => {
+      state.sessionTypeFilter = String(el.sessionTypeFilter.value || "").trim();
+      await ensureSelectedSessionVisible();
+      renderSessionList();
+    });
+  }
+
+  if (el.sessionEditorToggle) {
+    el.sessionEditorToggle.addEventListener("click", () => {
+      setSessionEditorCollapsed(!state.sessionEditorCollapsed, true);
+    });
+  }
 
   el.createSessionForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -143,6 +594,10 @@ function bindEvents() {
       state.selectedSessionID = session.id;
       renderSessionList();
       await loadSession(session.id);
+      if (isMobileViewport()) {
+        setMobileView("chat");
+      }
+      updateSettingsContext();
     } catch (err) {
       setCreateSessionStatus(`创建失败: ${err.message}`, true);
     }
@@ -194,6 +649,7 @@ function bindEvents() {
       );
       el.continuePrompt.value = "";
       setStreamStatus(`continue 已提交, job=${result?.data?.job_id ?? "n/a"}`, false);
+      updateLocalSessionStatus(sessionID, "running");
       if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
         await connectStream();
       }
@@ -209,6 +665,110 @@ function bindEvents() {
   el.reconnectStream.addEventListener("click", async () => {
     await connectStream();
   });
+
+  if (el.continuePrompt) {
+    el.continuePrompt.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) {
+        return;
+      }
+      event.preventDefault();
+      el.continueForm.requestSubmit();
+    });
+  }
+
+  if (el.deleteSessionButton) {
+    el.deleteSessionButton.addEventListener("click", async () => {
+      await deleteCurrentSession();
+    });
+  }
+
+  if (el.sessionEditorForm) {
+    el.sessionEditorForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const sessionID = state.selectedSessionID;
+      const adapter = currentAdapter();
+      if (!sessionID || !adapter) {
+        setSessionEditorStatus("请先选择会话", true);
+        return;
+      }
+
+      const nextMeta = {
+        title: String(el.sessionEditTitle?.value || "").trim(),
+        note: String(el.sessionEditNote?.value || "").trim(),
+        type: String(el.sessionEditType?.value || "").trim(),
+      };
+      try {
+        await setSessionMeta(adapter, sessionID, nextMeta);
+        refreshSessionTypeControls();
+        renderSessionList();
+        applySessionHeader(sessionID);
+        setSessionEditorStatus("已保存会话信息", false);
+        if (isMobileViewport() && state.mobileView === "editor") {
+          setMobileView("chat");
+        }
+        updateSettingsContext();
+      } catch (err) {
+        setSessionEditorStatus(`保存失败: ${err.message}`, true);
+      }
+    });
+  }
+
+  if (el.sessionEditorReset) {
+    el.sessionEditorReset.addEventListener("click", async () => {
+      const sessionID = state.selectedSessionID;
+      const adapter = currentAdapter();
+      if (!sessionID || !adapter) {
+        setSessionEditorStatus("请先选择会话", true);
+        return;
+      }
+      try {
+        await setSessionMeta(adapter, sessionID, { title: "", note: "", type: "" });
+        refreshSessionTypeControls();
+        populateSessionEditor(sessionID);
+        renderSessionList();
+        applySessionHeader(sessionID);
+        setSessionEditorStatus("已清空自定义信息", false);
+        updateSettingsContext();
+      } catch (err) {
+        setSessionEditorStatus(`清空失败: ${err.message}`, true);
+      }
+    });
+  }
+}
+
+async function deleteCurrentSession() {
+  const adapter = currentAdapter();
+  const sessionID = state.selectedSessionID;
+  if (!adapter || !sessionID) {
+    setStreamStatus("请先选择会话", true);
+    return;
+  }
+  if (state.continuePending) {
+    setStreamStatus("正在发送消息，暂不能删除会话", true);
+    return;
+  }
+  if (!window.confirm("确认删除当前会话？此操作不可撤销。")) {
+    return;
+  }
+  try {
+    await fetchAPI(`/api/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}`, {
+      method: "DELETE",
+    });
+    setStreamStatus("会话已删除", false);
+    await refreshSessions();
+    await restoreSelectedSession();
+    if (isMobileViewport()) {
+      setMobileView("chat");
+    }
+    updateSettingsContext();
+  } catch (err) {
+    setStreamStatus(`删除失败: ${err.message}`, true);
+  } finally {
+    updateDeleteSessionButtonState();
+  }
 }
 
 async function loadDefaults() {
@@ -233,6 +793,253 @@ function loadSavedConfig() {
 
 function saveConfig(config) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+}
+
+function loadSavedTheme() {
+  try {
+    const value = String(localStorage.getItem(THEME_STORAGE_KEY) || "").trim().toLowerCase();
+    if (value === "light" || value === "dark") {
+      return value;
+    }
+  } catch {
+    // Ignore localStorage access failures and fallback to system preference.
+  }
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
+    return "light";
+  }
+  return "dark";
+}
+
+function saveTheme(theme) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
+function applyTheme(theme) {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  state.theme = nextTheme;
+  document.body.classList.toggle("theme-light", nextTheme === "light");
+  if (el.themeToggle) {
+    el.themeToggle.textContent = nextTheme === "light" ? "暗色模式" : "亮色模式";
+  }
+}
+
+function initTheme() {
+  applyTheme(loadSavedTheme());
+}
+
+function loadSessionEditorCollapsed() {
+  try {
+    const raw = String(localStorage.getItem(SESSION_EDITOR_COLLAPSE_KEY) || "").trim().toLowerCase();
+    if (raw === "0" || raw === "false") {
+      return false;
+    }
+    if (raw === "1" || raw === "true") {
+      return true;
+    }
+  } catch {
+    // Ignore localStorage failures.
+  }
+  return true;
+}
+
+function saveSessionEditorCollapsed(collapsed) {
+  try {
+    localStorage.setItem(SESSION_EDITOR_COLLAPSE_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
+function setSessionEditorCollapsed(collapsed, persist = false) {
+  const next = Boolean(collapsed);
+  state.sessionEditorCollapsed = next;
+  if (el.sessionEditorBody) {
+    el.sessionEditorBody.classList.toggle("is-collapsed", next);
+  }
+  if (el.conversation) {
+    el.conversation.classList.toggle("editor-open", !next);
+  }
+  if (el.conversationHead) {
+    el.conversationHead.classList.toggle("editor-open", !next);
+  }
+  if (el.sessionEditorToggle) {
+    el.sessionEditorToggle.setAttribute("aria-expanded", next ? "false" : "true");
+    el.sessionEditorToggle.setAttribute("data-icon", next ? "▾" : "▴");
+    el.sessionEditorToggle.textContent = next ? "编辑会话信息" : "收起会话编辑";
+  }
+  if (!next) {
+    // Expanded state should start from top to avoid appearing "stuck" at the bottom.
+    if (el.conversationHead) {
+      el.conversationHead.scrollTop = 0;
+    }
+    if (el.sessionEditorBody) {
+      el.sessionEditorBody.scrollTop = 0;
+    }
+  }
+  if (persist) {
+    saveSessionEditorCollapsed(next);
+  }
+}
+
+function initSessionEditorCollapse() {
+  setSessionEditorCollapsed(loadSessionEditorCollapsed(), false);
+}
+
+function switchSettingsTab(tabName) {
+  const selected = String(tabName || "connection").trim() || "connection";
+  el.settingsTabs.forEach((tabButton) => {
+    const active = tabButton.dataset.settingsTab === selected;
+    tabButton.classList.toggle("is-active", active);
+    tabButton.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  el.settingsPanels.forEach((panel) => {
+    const active = panel.dataset.settingsPanel === selected;
+    panel.classList.toggle("is-active", active);
+  });
+}
+
+function updateSettingsContext() {
+  const adapter = currentAdapter();
+  if (el.settingsSelectedAdapter) {
+    el.settingsSelectedAdapter.textContent = `adapter: ${adapter || "-"}`;
+  }
+
+  if (el.settingsSelectedSession) {
+    const sessionID = String(state.selectedSessionID || "").trim();
+    if (!sessionID) {
+      el.settingsSelectedSession.textContent = "session: -";
+    } else {
+      const session = state.sessions.find((item) => item.id === sessionID);
+      const meta = getSessionMeta(adapter, sessionID);
+      const displayName = String(meta.title || "").trim() || String(session?.title || "").trim() || sessionID;
+      el.settingsSelectedSession.textContent = `session: ${displayName} (${sessionID})`;
+    }
+  }
+  updateSettingsStreamContext();
+  updateMobileBrand();
+}
+
+function updateSettingsStreamContext() {
+  if (el.settingsStreamMode) {
+    el.settingsStreamMode.textContent = `状态: ${state.streamStatusText || "-"}`;
+    el.settingsStreamMode.classList.toggle("text-danger", Boolean(state.streamStatusError));
+  }
+  if (el.settingsStreamAttempts) {
+    el.settingsStreamAttempts.textContent = `重连次数: ${Number(state.wsReconnectAttempts || 0)}`;
+  }
+}
+
+function sessionMetaKey(adapter, sessionID) {
+  return `${String(adapter || "").trim()}::${String(sessionID || "").trim()}`;
+}
+
+function getSessionMeta(adapter, sessionID) {
+  const key = sessionMetaKey(adapter, sessionID);
+  const item = state.sessionMetaStore[key];
+  if (!item || typeof item !== "object") {
+    return { title: "", note: "", type: "" };
+  }
+  return {
+    title: String(item.title || "").trim(),
+    note: String(item.note || "").trim(),
+    type: String(item.type || "").trim(),
+  };
+}
+
+function cacheSessionMeta(adapter, sessionID, rawMeta) {
+  const key = sessionMetaKey(adapter, sessionID);
+  const normalized = {
+    title: String(rawMeta?.title ?? rawMeta?.name ?? "").trim(),
+    note: String(rawMeta?.note || "").trim(),
+    type: String(rawMeta?.type || "").trim(),
+  };
+  if (!normalized.title && !normalized.note && !normalized.type) {
+    delete state.sessionMetaStore[key];
+  } else {
+    state.sessionMetaStore[key] = normalized;
+  }
+}
+
+function syncSessionMetaFromSession(adapter, session) {
+  if (!adapter || !session?.id) {
+    return;
+  }
+  cacheSessionMeta(adapter, session.id, session.session_meta);
+}
+
+async function setSessionMeta(adapter, sessionID, next) {
+  const payload = {
+    name: String(next?.title || "").trim(),
+    note: String(next?.note || "").trim(),
+    type: String(next?.type || "").trim(),
+  };
+
+  const result = await fetchAPI(
+    `/api/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}/meta`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  cacheSessionMeta(adapter, sessionID, result?.data?.meta || payload);
+}
+
+function getKnownSessionTypes(adapter) {
+  const set = new Set(DEFAULT_SESSION_TYPES.map((item) => String(item).trim()).filter(Boolean));
+  Object.entries(state.sessionMetaStore).forEach(([key, item]) => {
+    if (adapter && !key.startsWith(`${adapter}::`)) {
+      return;
+    }
+    const sessionType = String(item?.type || "").trim();
+    if (sessionType) {
+      set.add(sessionType);
+    }
+  });
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function refreshSessionTypeControls() {
+  const selected = String(el.sessionTypeFilter?.value || state.sessionTypeFilter || "").trim();
+  const types = getKnownSessionTypes(currentAdapter());
+
+  if (el.sessionTypeFilter) {
+    el.sessionTypeFilter.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部类型";
+    el.sessionTypeFilter.appendChild(all);
+
+    types.forEach((sessionType) => {
+      const option = document.createElement("option");
+      option.value = sessionType;
+      option.textContent = sessionType;
+      el.sessionTypeFilter.appendChild(option);
+    });
+
+    if (selected && types.includes(selected)) {
+      el.sessionTypeFilter.value = selected;
+      state.sessionTypeFilter = selected;
+    } else {
+      el.sessionTypeFilter.value = "";
+      if (!selected || !types.includes(selected)) {
+        state.sessionTypeFilter = "";
+      }
+    }
+  }
+
+  if (el.sessionTypeOptions) {
+    el.sessionTypeOptions.innerHTML = "";
+    types.forEach((sessionType) => {
+      const option = document.createElement("option");
+      option.value = sessionType;
+      el.sessionTypeOptions.appendChild(option);
+    });
+  }
 }
 
 function applyConfigToForm(config) {
@@ -315,9 +1122,11 @@ function renderAdapterOptions(items) {
     }
     el.adapterSelect.appendChild(option);
   });
+  updateSettingsContext();
 }
 
-async function refreshSessions() {
+async function refreshSessions(options = {}) {
+  const silent = Boolean(options?.silent);
   const adapter = currentAdapter();
   if (!adapter) {
     state.sessions = [];
@@ -332,7 +1141,11 @@ async function refreshSessions() {
     const maxPages = 100;
 
     for (let i = 0; i < maxPages; i += 1) {
-      const query = new URLSearchParams({ limit: String(pageLimit) });
+      const query = new URLSearchParams({
+        limit: String(pageLimit),
+        sort_by: "updated_at",
+        sort_order: "desc",
+      });
       if (cursor) {
         query.set("cursor", cursor);
       }
@@ -347,6 +1160,7 @@ async function refreshSessions() {
           return;
         }
         seen.add(session.id);
+        syncSessionMetaFromSession(adapter, session);
         items.push(session);
       });
 
@@ -358,25 +1172,183 @@ async function refreshSessions() {
       cursor = nextCursor;
     }
 
+    items.sort(compareSessionUpdatedAtDesc);
+    pruneSessionMetaForAdapter(adapter, items);
+    refreshSessionTypeControls();
     state.sessions = items;
     renderSessionList();
+    updateRunningSummary();
+    updateDeleteSessionButtonState();
+    if (state.selectedSessionID) {
+      applySessionHeader(state.selectedSessionID);
+    }
+    updateSettingsContext();
   } catch (err) {
+    if (silent) {
+      return;
+    }
     state.sessions = [];
     renderSessionList();
+    updateRunningSummary();
+    updateDeleteSessionButtonState();
     setStreamStatus(`加载会话失败: ${err.message}`, true);
+    updateSettingsContext();
   }
+}
+
+function compareSessionUpdatedAtDesc(a, b) {
+  const left = Date.parse(String(a?.updated_at || "")) || 0;
+  const right = Date.parse(String(b?.updated_at || "")) || 0;
+  if (left !== right) {
+    return right - left;
+  }
+  return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+function pruneSessionMetaForAdapter(adapter, sessions) {
+  if (!adapter) {
+    return;
+  }
+  const keep = new Set((sessions || []).map((item) => sessionMetaKey(adapter, item?.id)));
+  Object.keys(state.sessionMetaStore).forEach((key) => {
+    if (!key.startsWith(`${adapter}::`)) {
+      return;
+    }
+    if (keep.has(key)) {
+      return;
+    }
+    delete state.sessionMetaStore[key];
+  });
+}
+
+function getVisibleSessions() {
+  const adapter = currentAdapter();
+  const search = String(state.sessionSearch || "").trim().toLowerCase();
+  const typeFilter = String(state.sessionTypeFilter || "").trim().toLowerCase();
+  const visible = [];
+
+  state.sessions.forEach((session) => {
+    const meta = getSessionMeta(adapter, session.id);
+    const sessionType = String(meta.type || "").trim();
+    const aliasTitle = String(meta.title || "").trim();
+    const note = String(meta.note || "").trim();
+
+    if (typeFilter && sessionType.toLowerCase() !== typeFilter) {
+      return;
+    }
+
+    const displayTitle = aliasTitle || session.title || session.id;
+    if (search) {
+      const corpus = [
+        session.id,
+        session.title,
+        displayTitle,
+        session.workspace,
+        session.source,
+        session.status,
+        sessionType,
+        note,
+      ]
+        .map((item) => String(item || "").toLowerCase())
+        .join(" ");
+      if (!corpus.includes(search)) {
+        return;
+      }
+    }
+
+    visible.push({
+      ...session,
+      displayTitle,
+      sessionType,
+      note,
+    });
+  });
+
+  return visible;
+}
+
+function ensureSessionPolling() {
+  if (state.sessionsPollTimer) {
+    return;
+  }
+  state.sessionsPollTimer = setInterval(() => {
+    void pollSessionsSilently();
+  }, SESSION_POLL_INTERVAL_MS);
+}
+
+async function pollSessionsSilently() {
+  if (state.sessionsPollInFlight) {
+    return;
+  }
+  state.sessionsPollInFlight = true;
+  try {
+    await refreshSessions({ silent: true });
+    if (state.selectedSessionID) {
+      renderSessionList();
+      applySessionHeader(state.selectedSessionID);
+    }
+  } finally {
+    state.sessionsPollInFlight = false;
+  }
+}
+
+function updateRunningSummary() {
+  if (!el.runningSummary) {
+    return;
+  }
+  const running = (state.sessions || []).filter((item) => normalizeSessionStatus(item?.status) === "running").length;
+  el.runningSummary.textContent = `进行中: ${running}`;
+}
+
+function updateDeleteSessionButtonState() {
+  if (!el.deleteSessionButton) {
+    return;
+  }
+  const visible = Boolean(state.selectedSessionID);
+  el.deleteSessionButton.disabled = !visible || state.continuePending;
+  el.deleteSessionButton.style.visibility = visible ? "visible" : "hidden";
+}
+
+function updateLocalSessionStatus(sessionID, nextStatus) {
+  if (!sessionID || !Array.isArray(state.sessions)) {
+    return;
+  }
+  const status = normalizeSessionStatus(nextStatus);
+  let changed = false;
+  state.sessions = state.sessions.map((item) => {
+    if (!item || item.id !== sessionID) {
+      return item;
+    }
+    if (normalizeSessionStatus(item.status) === status) {
+      return item;
+    }
+    changed = true;
+    return {
+      ...item,
+      status,
+    };
+  });
+  if (!changed) {
+    return;
+  }
+  state.sessions.sort(compareSessionUpdatedAtDesc);
+  renderSessionList();
+  applySessionHeader(sessionID);
 }
 
 function renderSessionList() {
   el.sessionList.innerHTML = "";
-  if (state.sessions.length === 0) {
+  updateRunningSummary();
+  const visibleSessions = getVisibleSessions();
+  if (visibleSessions.length === 0) {
     const li = document.createElement("li");
-    li.textContent = "无可用会话";
+    li.textContent = state.sessions.length === 0 ? "无可用会话" : "当前筛选条件下无会话";
     el.sessionList.appendChild(li);
+    updateDeleteSessionButtonState();
     return;
   }
 
-  state.sessions.forEach((session) => {
+  visibleSessions.forEach((session) => {
     const li = document.createElement("li");
     const button = document.createElement("button");
     button.type = "button";
@@ -386,33 +1358,82 @@ function renderSessionList() {
     }
     const title = document.createElement("p");
     title.className = "session-card-title";
-    title.textContent = session.title || session.id;
+    title.textContent = session.displayTitle || session.id;
 
     const meta = document.createElement("p");
     meta.className = "session-card-meta";
     meta.textContent = `${session.workspace || "-"} · ${session.updated_at || "-"}`;
 
-    button.append(title, meta);
+    const idLine = document.createElement("p");
+    idLine.className = "session-card-id";
+    idLine.textContent = `ID: ${session.id}`;
+
+    const status = normalizeSessionStatus(session.status);
+    const statusLine = document.createElement("p");
+    statusLine.className = "session-card-status";
+    statusLine.textContent = `状态: ${sessionStatusLabel(status)}`;
+    statusLine.classList.toggle("is-running", status === "running");
+    statusLine.classList.toggle("is-idle", status !== "running");
+
+    button.append(title, meta, idLine, statusLine);
+    if (session.sessionType) {
+      const tags = document.createElement("div");
+      tags.className = "session-card-tags";
+      const typeChip = document.createElement("span");
+      typeChip.className = "session-type-chip";
+      typeChip.textContent = session.sessionType;
+      tags.appendChild(typeChip);
+      button.appendChild(tags);
+    }
+    if (session.note) {
+      const noteLine = document.createElement("p");
+      noteLine.className = "session-note-line";
+      noteLine.textContent = session.note;
+      button.appendChild(noteLine);
+    }
+
     button.addEventListener("click", async () => {
       state.selectedSessionID = session.id;
       renderSessionList();
+      updateSettingsContext();
+      toggleSidebar(false);
       await loadSession(session.id);
     });
     li.appendChild(button);
     el.sessionList.appendChild(li);
   });
+  updateDeleteSessionButtonState();
 }
 
 async function restoreSelectedSession() {
-  if (state.sessions.length === 0) {
+  const visibleSessions = getVisibleSessions();
+  if (visibleSessions.length === 0) {
     clearSessionView();
     return;
   }
 
-  const exists = state.sessions.some((s) => s.id === state.selectedSessionID);
+  const exists = visibleSessions.some((s) => s.id === state.selectedSessionID);
   if (!exists) {
-    state.selectedSessionID = state.sessions[0].id;
+    state.selectedSessionID = visibleSessions[0].id;
   }
+  renderSessionList();
+  await loadSession(state.selectedSessionID);
+}
+
+async function ensureSelectedSessionVisible() {
+  if (!state.selectedSessionID) {
+    return;
+  }
+  const visibleSessions = getVisibleSessions();
+  if (visibleSessions.length === 0) {
+    clearSessionView();
+    return;
+  }
+  const exists = visibleSessions.some((item) => item.id === state.selectedSessionID);
+  if (exists) {
+    return;
+  }
+  state.selectedSessionID = visibleSessions[0].id;
   renderSessionList();
   await loadSession(state.selectedSessionID);
 }
@@ -426,8 +1447,56 @@ function clearSessionView() {
   closeStream();
   el.sessionTitle.textContent = "未选择会话";
   el.sessionMeta.textContent = "请选择左侧会话";
+  if (el.sessionIDLine) {
+    el.sessionIDLine.textContent = "session_id: -";
+  }
+  populateSessionEditor("");
+  setSessionEditorStatus("未编辑", false);
   renderChatThread();
+  updateChatNavigation();
+  updateDeleteSessionButtonState();
   setStreamStatus("WS 未连接", false);
+  updateSettingsContext();
+}
+
+async function fetchAllSessionEvents(adapter, sessionID) {
+  const items = [];
+  const seen = new Set();
+  let cursor = "";
+  const pageLimit = 500;
+  const maxPages = 80;
+
+  for (let i = 0; i < maxPages; i += 1) {
+    const query = new URLSearchParams({ limit: String(pageLimit) });
+    if (cursor) {
+      query.set("cursor", cursor);
+    }
+    const result = await fetchAPI(
+      `/api/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}/events?${query.toString()}`,
+      { method: "GET" },
+    );
+
+    const pageItems = result?.data?.items || [];
+    pageItems.forEach((event) => {
+      const seq = Number(event?.seq || 0);
+      if (seq > 0) {
+        if (seen.has(seq)) {
+          return;
+        }
+        seen.add(seq);
+      }
+      items.push(event);
+    });
+
+    const hasMore = Boolean(result?.data?.has_more);
+    const nextCursor = String(result?.data?.next_cursor || "");
+    if (!hasMore || !nextCursor || nextCursor === cursor || pageItems.length === 0) {
+      break;
+    }
+    cursor = nextCursor;
+  }
+
+  return items;
 }
 
 async function loadSession(sessionID) {
@@ -441,26 +1510,78 @@ async function loadSession(sessionID) {
       `/api/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}`,
       { method: "GET" },
     );
-    const events = await fetchAPI(
-      `/api/v1/adapters/${encodeURIComponent(adapter)}/sessions/${encodeURIComponent(sessionID)}/events?limit=500`,
-      { method: "GET" },
-    );
+    const eventItems = await fetchAllSessionEvents(adapter, sessionID);
 
     const sessionDetail = detail?.data || {};
-    const eventItems = events?.data?.items || [];
 
-    el.sessionTitle.textContent = sessionDetail.title || sessionID;
-    el.sessionMeta.textContent = `workspace: ${sessionDetail.workspace || "-"} · updated_at: ${sessionDetail.updated_at || "-"}`;
+    syncSessionMetaFromSession(adapter, { id: sessionID, session_meta: sessionDetail?.session_meta });
+    applySessionHeader(sessionID, sessionDetail);
+    populateSessionEditor(sessionID);
+    setSessionEditorStatus("未编辑", false);
 
     const rebuilt = buildMessagesFromEvents(eventItems);
     state.messages = rebuilt.messages;
     state.assistantDraftId = rebuilt.assistantDraftId;
     state.lastSeq = eventItems.length > 0 ? Number(eventItems[eventItems.length - 1].seq || 0) : 0;
     renderChatThread();
+    if (el.chatThread) {
+      el.chatThread.scrollTop = el.chatThread.scrollHeight;
+    }
+    updateDeleteSessionButtonState();
+    updateSettingsContext();
 
     await connectStream();
   } catch (err) {
     setStreamStatus(`加载会话详情失败: ${err.message}`, true);
+  }
+}
+
+function applySessionHeader(sessionID, sessionDetail) {
+  const adapter = currentAdapter();
+  const detail = sessionDetail || state.sessions.find((item) => item.id === sessionID) || {};
+  const meta = getSessionMeta(adapter, sessionID);
+  const title = String(meta.title || "").trim() || detail.title || sessionID;
+  const workspace = detail.workspace || "-";
+  const updatedAt = detail.updated_at || "-";
+  const source = detail.source ? ` · source: ${detail.source}` : "";
+  const status = normalizeSessionStatus(detail.status);
+  const sessionType = String(meta.type || "").trim();
+  const note = String(meta.note || "").trim();
+
+  el.sessionTitle.textContent = title;
+  el.sessionMeta.textContent = `workspace: ${workspace} · updated_at: ${updatedAt}${source} · 状态: ${sessionStatusLabel(status)}`;
+  if (el.sessionIDLine) {
+    let idLine = `session_id: ${sessionID}`;
+    if (sessionType) {
+      idLine += ` · type: ${sessionType}`;
+    }
+    if (note) {
+      idLine += ` · note: ${note}`;
+    }
+    el.sessionIDLine.textContent = idLine;
+  }
+  updateDeleteSessionButtonState();
+  updateSettingsContext();
+}
+
+function populateSessionEditor(sessionID) {
+  const adapter = currentAdapter();
+  const hasSession = Boolean(adapter && sessionID);
+  const meta = hasSession ? getSessionMeta(adapter, sessionID) : { title: "", note: "", type: "" };
+  const fields = [el.sessionEditTitle, el.sessionEditType, el.sessionEditNote, el.sessionEditorSave, el.sessionEditorReset];
+  fields.forEach((node) => {
+    if (node) {
+      node.disabled = !hasSession;
+    }
+  });
+  if (el.sessionEditTitle) {
+    el.sessionEditTitle.value = meta.title || "";
+  }
+  if (el.sessionEditType) {
+    el.sessionEditType.value = meta.type || "";
+  }
+  if (el.sessionEditNote) {
+    el.sessionEditNote.value = meta.note || "";
   }
 }
 
@@ -608,13 +1729,150 @@ function appendActionToMessage(message, actionText) {
   }
 }
 
+function bindChatNavigation() {
+  if (el.chatThread) {
+    el.chatThread.addEventListener("scroll", () => {
+      updateChatNavigation();
+    });
+  }
+  if (el.chatJumpTop) {
+    el.chatJumpTop.addEventListener("click", () => {
+      el.chatThread.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+  if (el.chatJumpBottom) {
+    el.chatJumpBottom.addEventListener("click", () => {
+      el.chatThread.scrollTo({ top: el.chatThread.scrollHeight, behavior: "smooth" });
+    });
+  }
+  updateChatNavigation();
+}
+
+function updateChatNavigation() {
+  if (!el.chatThread) {
+    return;
+  }
+  const scrollable = el.chatThread.scrollHeight - el.chatThread.clientHeight > 80;
+  const atTop = el.chatThread.scrollTop <= 12;
+  const distanceToBottom = Math.max(0, el.chatThread.scrollHeight - el.chatThread.clientHeight - el.chatThread.scrollTop);
+  const atBottom = distanceToBottom <= 12;
+
+  if (el.chatJumpTop) {
+    el.chatJumpTop.classList.toggle("is-hidden", !scrollable || atTop);
+  }
+  if (el.chatJumpBottom) {
+    el.chatJumpBottom.classList.toggle("is-hidden", !scrollable || atBottom);
+  }
+}
+
+function isChatNearBottom(threshold = 56) {
+  if (!el.chatThread) {
+    return true;
+  }
+  const distanceToBottom = Math.max(0, el.chatThread.scrollHeight - el.chatThread.clientHeight - el.chatThread.scrollTop);
+  return distanceToBottom <= threshold;
+}
+
+function escapeHTML(raw) {
+  return String(raw ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeAttr(raw) {
+  return escapeHTML(raw).replace(/`/g, "&#96;");
+}
+
+function renderMarkdownHTML(source) {
+  const tokenMap = [];
+  const pushToken = (html) => {
+    const key = `__MD_TOKEN_${tokenMap.length}__`;
+    tokenMap.push({ key, html });
+    return key;
+  };
+
+  let content = String(source || "").replace(/\r\n?/g, "\n");
+
+  // Fenced code blocks first to avoid being touched by inline formatting.
+  content = content.replace(/```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```/g, (_, language, code) => {
+    const lang = String(language || "").trim().replace(/[^a-zA-Z0-9_-]/g, "");
+    const className = lang ? ` class="language-${lang}"` : "";
+    return pushToken(`<pre class="md-code"><code${className}>${escapeHTML(code)}</code></pre>`);
+  });
+
+  content = content.replace(/`([^`\n]+)`/g, (_, code) => {
+    return pushToken(`<code>${escapeHTML(code)}</code>`);
+  });
+
+  content = content.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
+    const href = String(url || "").trim();
+    if (!/^https?:\/\//i.test(href)) {
+      return match;
+    }
+    return pushToken(
+      `<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(label)}</a>`,
+    );
+  });
+
+  let html = escapeHTML(content);
+
+  // Block-level Markdown.
+  html = html
+    .replace(/^######\s+(.*)$/gm, "<h6>$1</h6>")
+    .replace(/^#####\s+(.*)$/gm, "<h5>$1</h5>")
+    .replace(/^####\s+(.*)$/gm, "<h4>$1</h4>")
+    .replace(/^###\s+(.*)$/gm, "<h3>$1</h3>")
+    .replace(/^##\s+(.*)$/gm, "<h2>$1</h2>")
+    .replace(/^#\s+(.*)$/gm, "<h1>$1</h1>")
+    .replace(/^&gt;\s?(.*)$/gm, "<blockquote>$1</blockquote>");
+
+  html = html.replace(/(?:^(?:\s*[-*+]\s+.+)\n?)+/gm, (block) => {
+    const items = block
+      .trim()
+      .split("\n")
+      .map((line) => line.replace(/^\s*[-*+]\s+/, "").trim())
+      .filter(Boolean);
+    if (items.length === 0) {
+      return block;
+    }
+    return `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>`;
+  });
+
+  html = html.replace(/(?:^(?:\s*\d+\.\s+.+)\n?)+/gm, (block) => {
+    const items = block
+      .trim()
+      .split("\n")
+      .map((line) => line.replace(/^\s*\d+\.\s+/, "").trim())
+      .filter(Boolean);
+    if (items.length === 0) {
+      return block;
+    }
+    return `<ol>${items.map((item) => `<li>${item}</li>`).join("")}</ol>`;
+  });
+
+  // Inline Markdown.
+  html = html.replace(/\*\*([^*\n][\s\S]*?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\n/g, "<br />");
+
+  tokenMap.forEach((item) => {
+    html = html.replaceAll(item.key, item.html);
+  });
+  return html;
+}
+
 function renderChatThread() {
+  const shouldStickToBottom = isChatNearBottom();
   el.chatThread.innerHTML = "";
   if (state.messages.length === 0) {
     const empty = document.createElement("p");
     empty.className = "chat-empty";
     empty.textContent = "当前会话暂无消息，先输入一条 continue 开始对话。";
     el.chatThread.appendChild(empty);
+    renderToolInsights();
+    updateChatNavigation();
     return;
   }
 
@@ -630,7 +1888,7 @@ function renderChatThread() {
 
     const body = document.createElement("div");
     body.className = "chat-body";
-    body.textContent = message.text || "";
+    body.innerHTML = renderMarkdownHTML(message.text || "");
 
     bubble.append(meta, body);
     if (Array.isArray(message.actions) && message.actions.length > 0) {
@@ -651,7 +1909,57 @@ function renderChatThread() {
   tailSpacer.setAttribute("aria-hidden", "true");
   el.chatThread.appendChild(tailSpacer);
 
-  el.chatThread.scrollTop = el.chatThread.scrollHeight;
+  if (shouldStickToBottom) {
+    el.chatThread.scrollTop = el.chatThread.scrollHeight;
+  }
+  renderToolInsights();
+  updateChatNavigation();
+}
+
+function renderToolInsights() {
+  if (!el.toolEventList) {
+    return;
+  }
+  el.toolEventList.innerHTML = "";
+
+  const recentActions = [];
+  for (let i = state.messages.length - 1; i >= 0 && recentActions.length < 24; i -= 1) {
+    const message = state.messages[i];
+    if (!Array.isArray(message?.actions) || message.actions.length === 0) {
+      continue;
+    }
+    for (let j = message.actions.length - 1; j >= 0 && recentActions.length < 24; j -= 1) {
+      recentActions.push({
+        role: message.role === "user" ? "用户" : "助手",
+        seq: Number(message.seq || 0),
+        text: String(message.actions[j] || "").trim(),
+      });
+    }
+  }
+
+  if (recentActions.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "tool-event-empty";
+    empty.textContent = "暂无工具动作";
+    el.toolEventList.appendChild(empty);
+    return;
+  }
+
+  recentActions.forEach((action, idx) => {
+    const li = document.createElement("li");
+    li.className = "tool-event-item";
+
+    const meta = document.createElement("p");
+    meta.className = "tool-event-meta";
+    meta.textContent = `#${recentActions.length - idx} · ${action.role}${action.seq > 0 ? ` · seq ${action.seq}` : ""}`;
+
+    const body = document.createElement("p");
+    body.className = "tool-event-body";
+    body.textContent = action.text || "-";
+
+    li.append(meta, body);
+    el.toolEventList.appendChild(li);
+  });
 }
 
 async function connectStream() {
@@ -764,6 +2072,7 @@ function handleWSFrame(frame) {
     finalizeAssistantDraft(state.messages, draftRef);
     state.assistantDraftId = draftRef.id;
     renderChatThread();
+    updateLocalSessionStatus(state.selectedSessionID, "idle");
     setStreamStatus("收到 done 帧", false);
     return;
   }
@@ -778,10 +2087,36 @@ function handleWSFrame(frame) {
   }
   state.lastSeq = seq;
 
+  updateSelectedSessionByEvent(event);
   const draftRef = { id: state.assistantDraftId };
   applyEventToMessages(state.messages, draftRef, event);
   state.assistantDraftId = draftRef.id;
+  if (event.type === "message.user" || event.type === "message.delta") {
+    updateLocalSessionStatus(state.selectedSessionID, "running");
+  }
+  if (event.type === "message.done" || (event?.normalized?.role === "assistant" && event?.normalized?.done)) {
+    updateLocalSessionStatus(state.selectedSessionID, "idle");
+  }
   renderChatThread();
+}
+
+function updateSelectedSessionByEvent(event) {
+  const sessionID = state.selectedSessionID;
+  if (!sessionID) {
+    return;
+  }
+  const idx = state.sessions.findIndex((item) => item.id === sessionID);
+  if (idx < 0) {
+    return;
+  }
+  const ts = String(event?.ts || "").trim() || new Date().toISOString();
+  state.sessions[idx] = {
+    ...state.sessions[idx],
+    updated_at: ts,
+  };
+  state.sessions.sort(compareSessionUpdatedAtDesc);
+  renderSessionList();
+  applySessionHeader(sessionID);
 }
 
 function closeStream(resetRetry = true) {
@@ -794,6 +2129,7 @@ function closeStream(resetRetry = true) {
   if (resetRetry) {
     state.wsReconnectAttempts = 0;
   }
+  updateSettingsStreamContext();
 }
 
 function finalizeAssistantDraft(messages, draftRef, fallbackSeq = 0) {
@@ -855,8 +2191,11 @@ function setSettingsStatus(text, isError) {
 }
 
 function setStreamStatus(text, isError) {
+  state.streamStatusText = String(text || "");
+  state.streamStatusError = Boolean(isError);
   el.streamStatus.textContent = text;
   el.streamStatus.classList.toggle("text-danger", Boolean(isError));
+  updateSettingsStreamContext();
 }
 
 function setCreateSessionStatus(text, isError) {
@@ -864,9 +2203,18 @@ function setCreateSessionStatus(text, isError) {
   el.createSessionStatus.classList.toggle("text-danger", Boolean(isError));
 }
 
+function setSessionEditorStatus(text, isError) {
+  if (!el.sessionEditorStatus) {
+    return;
+  }
+  el.sessionEditorStatus.textContent = text;
+  el.sessionEditorStatus.classList.toggle("text-danger", Boolean(isError));
+}
+
 function setContinuePending(pending) {
   state.continuePending = Boolean(pending);
   el.continuePrompt.disabled = state.continuePending;
   el.continueSubmit.disabled = state.continuePending;
   el.continueSubmit.textContent = state.continuePending ? "发送中..." : "Continue";
+  updateDeleteSessionButtonState();
 }

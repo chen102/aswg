@@ -31,13 +31,14 @@ type AdapterInfo struct {
 }
 
 type SessionSummary struct {
-	Adapter   string    `json:"adapter"`
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Workspace string    `json:"workspace"`
-	Source    string    `json:"source"`
+	Adapter   string       `json:"adapter"`
+	ID        string       `json:"id"`
+	Title     string       `json:"title"`
+	Status    string       `json:"status"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Workspace string       `json:"workspace"`
+	Source    string       `json:"source"`
+	Meta      *SessionMeta `json:"session_meta,omitempty"`
 }
 
 type SessionDetail struct {
@@ -50,6 +51,14 @@ type SessionDetail struct {
 	Workspace string         `json:"workspace"`
 	Source    string         `json:"source"`
 	Metadata  map[string]any `json:"metadata"`
+	Meta      *SessionMeta   `json:"session_meta,omitempty"`
+}
+
+type SessionMeta struct {
+	Name      string    `json:"name,omitempty"`
+	Note      string    `json:"note,omitempty"`
+	Type      string    `json:"type,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 type SessionEvent struct {
@@ -77,6 +86,12 @@ type CreateSessionInput struct {
 	Title      string
 	Workspace  string
 	SeedPrompt string
+}
+
+type SessionMetaRequest struct {
+	Name string `json:"name,omitempty"`
+	Note string `json:"note,omitempty"`
+	Type string `json:"type,omitempty"`
 }
 
 type ContinueInput struct {

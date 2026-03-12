@@ -15,6 +15,7 @@ type Config struct {
 	Version                 string
 	SeedFile                string
 	FrontendDir             string
+	SessionMetaMapFile      string
 	RateLimitSessionsPerSec int
 }
 
@@ -46,6 +47,11 @@ func LoadConfig() Config {
 		frontendDir = "frontend/src"
 	}
 
+	sessionMetaMapFile := strings.TrimSpace(os.Getenv("SESSION_META_MAP_FILE"))
+	if sessionMetaMapFile == "" {
+		sessionMetaMapFile = ".run/session-meta-map.json"
+	}
+
 	enabledAdapters := splitCSV(strings.TrimSpace(os.Getenv("ENABLED_ADAPTERS")))
 	if len(enabledAdapters) == 0 {
 		enabledAdapters = []string{"codex"}
@@ -72,6 +78,7 @@ func LoadConfig() Config {
 		Version:                 version,
 		SeedFile:                seedFile,
 		FrontendDir:             frontendDir,
+		SessionMetaMapFile:      sessionMetaMapFile,
 		RateLimitSessionsPerSec: rateLimitSessionsPerSec,
 	}
 }

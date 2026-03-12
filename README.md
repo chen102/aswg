@@ -194,12 +194,15 @@ SERVER_HOST=0.0.0.0
 14. `CODEX_HISTORY_ENABLED`（默认 `true`）
 15. `CODEX_HISTORY_DIR`（默认 `~/.codex/sessions`）
 16. `CODEX_HISTORY_SCAN_TTL_MS`（默认 `5000`）
-17. `PICOCLAW_WS_BASE_URL`（默认 `ws://127.0.0.1:8080`）
-18. `PICOCLAW_TOKEN`（默认空，启用 `picoclaw` 适配器时必填）
-19. `PICOCLAW_ALLOW_TOKEN_QUERY`（默认 `false`）
-20. `PICOCLAW_DIAL_TIMEOUT_MS`（默认 `5000`）
-21. `PICOCLAW_CONTINUE_TIMEOUT_MS`（默认 `120000`）
-22. `PICOCLAW_READ_IDLE_TIMEOUT_MS`（默认 `45000`）
+17. `CODEX_HISTORY_ACTIVE_WINDOW_MS`（默认 `600000`，用于历史会话运行状态探测）
+18. `CODEX_HISTORY_TAIL_INTERVAL_MS`（默认 `2000`，用于历史会话事件推送轮询间隔）
+19. `PICOCLAW_WS_BASE_URL`（默认 `ws://127.0.0.1:8080`）
+20. `PICOCLAW_TOKEN`（默认空，启用 `picoclaw` 适配器时必填）
+21. `PICOCLAW_ALLOW_TOKEN_QUERY`（默认 `false`）
+22. `PICOCLAW_DIAL_TIMEOUT_MS`（默认 `5000`）
+23. `PICOCLAW_CONTINUE_TIMEOUT_MS`（默认 `120000`）
+24. `PICOCLAW_READ_IDLE_TIMEOUT_MS`（默认 `45000`）
+25. `SESSION_META_MAP_FILE`（默认 `.run/session-meta-map.json`，用于会话名称/备注/类型映射表持久化）
 
 ## 图文档约定（Drawio）
 1. `docs/diagrams/*.drawio` 保存源文件。

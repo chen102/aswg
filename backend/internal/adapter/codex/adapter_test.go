@@ -295,6 +295,81 @@ func TestDiscoverSessionsIncludesHistorySessions(t *testing.T) {
 	}
 }
 
+func TestDiscoverSessionsMergesHistoryThreadIntoLocalSession(t *testing.T) {
+	t.Setenv("CODEX_STREAM_MODE", "mock")
+	a, err := NewAdapter("")
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	local, err := a.CreateSession(context.Background(), model.CreateSessionInput{
+		Title:     "Local Session",
+		Workspace: "/workspace/local",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	threadID := "01900000-0000-7000-a100-0000000000aa"
+	a.setSessionThreadID(local.ID, threadID)
+
+	historyUpdatedAt := time.Now().UTC().Add(2 * time.Minute)
+	a.mu.Lock()
+	a.historyEnabled = true
+	a.historyDir = t.TempDir()
+	a.historyTTL = 10 * time.Minute
+	a.externalIndexAt = time.Now()
+	a.externalSessionIndex = map[string]externalSessionInfo{
+		threadID: {
+			detail: model.SessionDetail{
+				Adapter:   adapterName,
+				ID:        threadID,
+				Title:     "History Session",
+				Status:    sessionStatusRunning,
+				CreatedAt: time.Now().UTC().Add(-5 * time.Minute),
+				UpdatedAt: historyUpdatedAt,
+				Workspace: "/workspace/history",
+				Source:    defaultHistorySource,
+				Metadata: map[string]any{
+					"origin":          "codex_history",
+					"codex_thread_id": threadID,
+				},
+			},
+			path: filepath.Join(a.historyDir, threadID+".jsonl"),
+		},
+	}
+	a.mu.Unlock()
+
+	page, err := a.DiscoverSessions(context.Background(), model.DiscoverRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("DiscoverSessions() error = %v", err)
+	}
+
+	localCount := 0
+	historyCount := 0
+	for _, item := range page.Items {
+		if item.ID == local.ID {
+			localCount++
+			if item.Status != sessionStatusRunning {
+				t.Fatalf("expected local session status merged from history, got %q", item.Status)
+			}
+			if !item.UpdatedAt.Equal(historyUpdatedAt) {
+				t.Fatalf("expected local session updated_at=%s, got %s", historyUpdatedAt, item.UpdatedAt)
+			}
+		}
+		if item.ID == threadID {
+			historyCount++
+		}
+	}
+
+	if localCount != 1 {
+		t.Fatalf("expected local session to appear once, got %d", localCount)
+	}
+	if historyCount != 0 {
+		t.Fatalf("expected aliased history session to be hidden, got %d", historyCount)
+	}
+}
+
 func TestGetSessionEventsLoadsHistorySession(t *testing.T) {
 	t.Setenv("CODEX_STREAM_MODE", "mock")
 	historyDir := t.TempDir()
@@ -358,19 +433,31 @@ func TestSummarizeCLIAction(t *testing.T) {
 			name:      "command started",
 			eventType: "item.started",
 			rawLine:   `{"type":"item.started","item":{"type":"command_execution","command":"/bin/bash -lc 'ls -la'"}}`,
-			want:      "正在执行命令: /bin/bash -lc 'ls -la'",
+			want:      "Run · /bin/bash -lc 'ls -la'",
 		},
 		{
 			name:      "command completed",
 			eventType: "item.completed",
 			rawLine:   `{"type":"item.completed","item":{"type":"command_execution","command":"/bin/bash -lc 'ls -la'","exit_code":0}}`,
-			want:      "命令执行完成 (exit 0): /bin/bash -lc 'ls -la'",
+			want:      "Run ✓ (exit 0) · /bin/bash -lc 'ls -la'",
 		},
 		{
 			name:      "tool call completed",
 			eventType: "item.completed",
 			rawLine:   `{"type":"item.completed","item":{"type":"tool_call","name":"mcp__playwright__browser_snapshot"}}`,
-			want:      "工具调用完成: mcp__playwright__browser_snapshot",
+			want:      "Explored ✓ · mcp__playwright__browser_snapshot",
+		},
+		{
+			name:      "tool call edited",
+			eventType: "item.started",
+			rawLine:   `{"type":"item.started","item":{"type":"tool_call","name":"functions.apply_patch"}}`,
+			want:      "Edited · functions.apply_patch",
+		},
+		{
+			name:      "tool call fallback called",
+			eventType: "item.completed",
+			rawLine:   `{"type":"item.completed","item":{"type":"tool_call","name":"mcp__foo__bar"}}`,
+			want:      "Called ✓ · mcp__foo__bar",
 		},
 		{
 			name:      "agent message completed",
@@ -485,6 +572,109 @@ func TestParseCLIThreadID(t *testing.T) {
 
 	if got := parseCLIThreadID("turn.started", rawLine); got != "" {
 		t.Fatalf("parseCLIThreadID() unexpected non-empty: %q", got)
+	}
+}
+
+func TestDetectCLIApprovalPromptLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "awaiting approval",
+			line: "Pending approval: approve this command",
+			want: true,
+		},
+		{
+			name: "policy info should not trigger",
+			line: "Approval policy is currently never.",
+			want: false,
+		},
+		{
+			name: "regular output",
+			line: "command completed with exit code 0",
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := detectCLIApprovalPromptLine(tc.line); got != tc.want {
+				t.Fatalf("detectCLIApprovalPromptLine(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseCLIJSONLineDetectsApproval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "approval event type",
+			line: `{"type":"turn.approval_required","message":"approve this command"}`,
+			want: true,
+		},
+		{
+			name: "pending approval status",
+			line: `{"type":"item.started","item":{"type":"command_execution","status":"pending_approval"}}`,
+			want: true,
+		},
+		{
+			name: "normal command",
+			line: `{"type":"item.started","item":{"type":"command_execution","status":"in_progress"}}`,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, got := parseCLIJSONLine(tc.line)
+			if got != tc.want {
+				t.Fatalf("parseCLIJSONLine approval = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppendAssistantFailureIncludesApprovalHint(t *testing.T) {
+	t.Setenv("CODEX_STREAM_MODE", "mock")
+	a, err := NewAdapter("")
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	threadID := "01900000-0000-7000-a100-000000000003"
+	a.setSessionThreadID(defaultSessionID, threadID)
+	lastSeq := mustLatestSeq(t, a)
+
+	a.appendAssistantFailure(defaultSessionID, approvalRequiredError{threadID: threadID})
+
+	page, err := a.GetSessionEvents(context.Background(), model.EventsRequest{
+		SessionID: defaultSessionID,
+		Limit:     model.MaxEventsLimit,
+		Cursor:    model.EncodeSeqCursor(lastSeq),
+	})
+	if err != nil {
+		t.Fatalf("GetSessionEvents() error = %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected one failure event, got %d", len(page.Items))
+	}
+	gotText, _ := page.Items[0].Normalized["text"].(string)
+	if !strings.Contains(gotText, "codex resume "+threadID) {
+		t.Fatalf("expected approval hint to contain thread id, got %q", gotText)
 	}
 }
 

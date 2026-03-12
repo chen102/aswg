@@ -14,6 +14,9 @@ output/
 
 # Logs
 *.log
+.run/
+backend/.run/
+test-results/
 
 # Local secrets / machine-specific files
 *.key
@@ -24,3 +27,7 @@ output/
 
 # Local tooling binary
 plink.exe
+
+# Local UI debug artifacts
+playwright-*.png
+Agent Gateway.html
