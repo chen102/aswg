@@ -370,6 +370,152 @@ func TestDiscoverSessionsMergesHistoryThreadIntoLocalSession(t *testing.T) {
 	}
 }
 
+func TestDiscoverSessionsKeepsFresherLocalStatusWhenHistoryIsStale(t *testing.T) {
+	t.Setenv("CODEX_STREAM_MODE", "mock")
+	a, err := NewAdapter("")
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	local, err := a.CreateSession(context.Background(), model.CreateSessionInput{
+		Title:     "Local Session",
+		Workspace: "/workspace/local",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	threadID := "01900000-0000-7000-a100-0000000000bb"
+	localUpdatedAt := time.Now().UTC().Add(2 * time.Minute)
+
+	a.setSessionThreadID(local.ID, threadID)
+
+	a.mu.Lock()
+	if state, ok := a.sessions[local.ID]; ok {
+		state.detail.Status = sessionStatusIdle
+		state.detail.UpdatedAt = localUpdatedAt
+	}
+	a.historyEnabled = true
+	a.historyDir = t.TempDir()
+	a.historyTTL = 10 * time.Minute
+	a.externalIndexAt = time.Now().UTC()
+	a.externalSessionIndex = map[string]externalSessionInfo{
+		threadID: {
+			detail: model.SessionDetail{
+				Adapter:   adapterName,
+				ID:        threadID,
+				Title:     "History Session",
+				Status:    sessionStatusRunning,
+				CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
+				UpdatedAt: localUpdatedAt.Add(-5 * time.Minute),
+				Workspace: "/workspace/history",
+				Source:    defaultHistorySource,
+				Metadata: map[string]any{
+					"origin":          "codex_history",
+					"codex_thread_id": threadID,
+				},
+			},
+			path: filepath.Join(a.historyDir, threadID+".jsonl"),
+		},
+	}
+	a.mu.Unlock()
+
+	page, err := a.DiscoverSessions(context.Background(), model.DiscoverRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("DiscoverSessions() error = %v", err)
+	}
+
+	foundLocal := false
+	for _, item := range page.Items {
+		if item.ID != local.ID {
+			continue
+		}
+		foundLocal = true
+		if item.Status != sessionStatusIdle {
+			t.Fatalf("expected fresher local status=%q, got %q", sessionStatusIdle, item.Status)
+		}
+		if !item.UpdatedAt.Equal(localUpdatedAt) {
+			t.Fatalf("expected fresher local updated_at=%s, got %s", localUpdatedAt, item.UpdatedAt)
+		}
+	}
+	if !foundLocal {
+		t.Fatalf("expected local session %s in discover result", local.ID)
+	}
+}
+
+func TestReadHistorySessionSummaryMismatchedTerminalClearsRunning(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout-2026-03-13T10-00-00-01900000-0000-7000-a100-0000000000cc.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-03-13T10:00:00.000Z","type":"session_meta","payload":{"id":"01900000-0000-7000-a100-0000000000cc","timestamp":"2026-03-13T10:00:00.000Z","cwd":"/workspace/aswg","source":"cli"}}`,
+		`{"timestamp":"2026-03-13T10:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn_a"}}`,
+		`{"timestamp":"2026-03-13T10:00:05.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn_b"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	info, ok := readHistorySessionSummary(path, 10*time.Minute)
+	if !ok {
+		t.Fatalf("expected summary parse success")
+	}
+	if info.detail.Status != sessionStatusIdle {
+		t.Fatalf("expected status=%q after terminal event, got %q", sessionStatusIdle, info.detail.Status)
+	}
+}
+
+func TestReadHistorySessionSummaryKeepsRunningOnRecentHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout-2026-03-13T10-00-00-01900000-0000-7000-a100-0000000000dd.jsonl")
+	now := time.Now().UTC()
+	startedAt := now.Add(-30 * time.Minute)
+	heartbeatAt := now.Add(-1 * time.Minute)
+
+	content := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":"01900000-0000-7000-a100-0000000000dd","timestamp":%q,"cwd":"/workspace/aswg","source":"cli"}}`, startedAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn_a"}}`, startedAt.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","total":123}}`, heartbeatAt.Format(time.RFC3339Nano)),
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	info, ok := readHistorySessionSummary(path, 10*time.Minute)
+	if !ok {
+		t.Fatalf("expected summary parse success")
+	}
+	if info.detail.Status != sessionStatusRunning {
+		t.Fatalf("expected status=%q with recent heartbeat, got %q", sessionStatusRunning, info.detail.Status)
+	}
+}
+
+func TestReadHistorySessionSummaryAgentMessageClearsRunning(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout-2026-03-13T10-00-00-01900000-0000-7000-a100-0000000000ee.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-03-13T10:00:00.000Z","type":"session_meta","payload":{"id":"01900000-0000-7000-a100-0000000000ee","timestamp":"2026-03-13T10:00:00.000Z","cwd":"/workspace/aswg","source":"cli"}}`,
+		`{"timestamp":"2026-03-13T10:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn_a"}}`,
+		`{"timestamp":"2026-03-13T10:00:05.000Z","type":"event_msg","payload":{"type":"agent_message"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	info, ok := readHistorySessionSummary(path, 10*time.Minute)
+	if !ok {
+		t.Fatalf("expected summary parse success")
+	}
+	if info.detail.Status != sessionStatusIdle {
+		t.Fatalf("expected status=%q after agent_message, got %q", sessionStatusIdle, info.detail.Status)
+	}
+}
+
 func TestGetSessionEventsLoadsHistorySession(t *testing.T) {
 	t.Setenv("CODEX_STREAM_MODE", "mock")
 	historyDir := t.TempDir()
@@ -433,13 +579,19 @@ func TestSummarizeCLIAction(t *testing.T) {
 			name:      "command started",
 			eventType: "item.started",
 			rawLine:   `{"type":"item.started","item":{"type":"command_execution","command":"/bin/bash -lc 'ls -la'"}}`,
-			want:      "Run · /bin/bash -lc 'ls -la'",
+			want:      "Explored · /bin/bash -lc 'ls -la'",
 		},
 		{
 			name:      "command completed",
 			eventType: "item.completed",
 			rawLine:   `{"type":"item.completed","item":{"type":"command_execution","command":"/bin/bash -lc 'ls -la'","exit_code":0}}`,
-			want:      "Run ✓ (exit 0) · /bin/bash -lc 'ls -la'",
+			want:      "Explored ✓ (exit 0) · /bin/bash -lc 'ls -la'",
+		},
+		{
+			name:      "edit command completed",
+			eventType: "item.completed",
+			rawLine:   `{"type":"item.completed","item":{"type":"command_execution","command":"apply_patch <<'PATCH'","exit_code":0}}`,
+			want:      "Edited ✓ (exit 0) · apply_patch <<'PATCH'",
 		},
 		{
 			name:      "tool call completed",
@@ -643,6 +795,46 @@ func TestParseCLIJSONLineDetectsApproval(t *testing.T) {
 			_, _, _, got := parseCLIJSONLine(tc.line)
 			if got != tc.want {
 				t.Fatalf("parseCLIJSONLine approval = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsCLICompletionEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		eventType string
+		rawLine   string
+		want      bool
+	}{
+		{
+			name:      "turn completed top-level",
+			eventType: "turn.completed",
+			rawLine:   `{"type":"turn.completed"}`,
+			want:      true,
+		},
+		{
+			name:      "task completed in event_msg payload",
+			eventType: "event_msg",
+			rawLine:   `{"type":"event_msg","payload":{"type":"task_complete"}}`,
+			want:      true,
+		},
+		{
+			name:      "non-terminal item completion",
+			eventType: "item.completed",
+			rawLine:   `{"type":"item.completed","item":{"type":"command_execution"}}`,
+			want:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isCLICompletionEvent(tc.eventType, tc.rawLine); got != tc.want {
+				t.Fatalf("isCLICompletionEvent() = %v, want %v", got, tc.want)
 			}
 		})
 	}

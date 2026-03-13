@@ -74,14 +74,13 @@
           <header class="conversation-head">
             <div class="session-detail-title-row" id="session-title-row">
               <h3 id="session-title">未选择会话</h3>
-              <button id="delete-session-button" type="button" class="btn btn-danger" data-icon="×">删除会话</button>
             </div>
             <p id="session-meta" class="meta-line">请选择左侧会话</p>
             <p id="session-id-line" class="meta-line">session_id: -</p>
 
-            <form id="session-editor-form" class="session-editor-form">
-              <div class="session-editor-head">
-                <h4>会话信息编辑</h4>
+            <div class="stream-row">
+              <p id="stream-status" class="status-text">WS 未连接</p>
+              <div class="stream-actions">
                 <button
                   id="session-editor-toggle"
                   type="button"
@@ -92,41 +91,44 @@
                 >
                   编辑会话信息
                 </button>
+                <button id="toggle-tool-insights" type="button" class="btn btn-ghost" data-icon="☰" aria-expanded="false">
+                  工具轨迹
+                </button>
+                <button id="reconnect-stream" type="button" class="btn btn-ghost" data-icon="↺">重连流</button>
+                <button id="delete-session-button" type="button" class="btn btn-danger" data-icon="×">删除会话</button>
               </div>
-              <div id="session-editor-body" class="session-editor-body is-collapsed">
-                <div class="session-editor-grid">
-                  <label>
-                    <span>会话名称</span>
-                    <input id="session-edit-title" type="text" placeholder="自定义名称" />
-                  </label>
-                  <label>
-                    <span>会话类型（可自定义）</span>
-                    <input id="session-edit-type" type="text" list="session-type-options" placeholder="项目 / 需求 / bug修复" />
-                  </label>
-                  <label class="session-editor-note">
-                    <span>备注</span>
-                    <textarea id="session-edit-note" rows="2" placeholder="记录会话上下文和决策"></textarea>
-                  </label>
-                </div>
-                <datalist id="session-type-options">
-                  <option value="项目"></option>
-                  <option value="需求"></option>
-                  <option value="bug修复"></option>
-                  <option value="问题拆解"></option>
-                </datalist>
-                <div class="session-editor-actions">
-                  <button id="session-editor-save" type="submit" class="btn btn-outline" data-icon="✓">保存信息</button>
-                  <button id="session-editor-reset" type="button" class="btn btn-ghost" data-icon="⟲">清空自定义</button>
-                  <p id="session-editor-status" class="status-text">未编辑</p>
-                </div>
-              </div>
-            </form>
-
-            <div class="stream-row">
-              <p id="stream-status" class="status-text">WS 未连接</p>
-              <button id="reconnect-stream" type="button" class="btn btn-ghost" data-icon="↺">重连流</button>
             </div>
           </header>
+
+          <form id="session-editor-form" class="session-editor-form">
+            <div id="session-editor-body" class="session-editor-body is-collapsed">
+              <div class="session-editor-grid">
+                <label>
+                  <span>会话名称</span>
+                  <input id="session-edit-title" type="text" placeholder="自定义名称" />
+                </label>
+                <label>
+                  <span>会话类型（可自定义）</span>
+                  <input id="session-edit-type" type="text" list="session-type-options" placeholder="项目 / 需求 / bug修复" />
+                </label>
+                <label class="session-editor-note">
+                  <span>备注</span>
+                  <textarea id="session-edit-note" rows="2" placeholder="记录会话上下文和决策"></textarea>
+                </label>
+              </div>
+              <datalist id="session-type-options">
+                <option value="项目"></option>
+                <option value="需求"></option>
+                <option value="bug修复"></option>
+                <option value="问题拆解"></option>
+              </datalist>
+              <div class="session-editor-actions">
+                <button id="session-editor-save" type="submit" class="btn btn-outline" data-icon="✓">保存信息</button>
+                <button id="session-editor-reset" type="button" class="btn btn-ghost" data-icon="⟲">清空自定义</button>
+                <p id="session-editor-status" class="status-text">未编辑</p>
+              </div>
+            </div>
+          </form>
 
           <div class="chat-shell">
             <section class="chat-main">
@@ -138,7 +140,10 @@
             </section>
             <aside class="tool-insights">
               <div class="tool-insights-head">
-                <h4>工具轨迹</h4>
+                <div class="tool-insights-head-row">
+                  <h4>工具轨迹</h4>
+                  <button id="tool-insights-close" type="button" class="btn btn-ghost" data-icon="×">收起</button>
+                </div>
                 <p class="status-text">最近 24 条动作</p>
               </div>
               <ul id="tool-event-list" class="tool-event-list"></ul>

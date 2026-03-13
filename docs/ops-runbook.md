@@ -19,11 +19,9 @@
    - `AUTH_TOKEN`
    - `ENABLED_ADAPTERS`
    - `DEFAULT_ADAPTER`
-   - `CODEX_STREAM_MODE`
    - `CODEX_CLI_BIN`
    - `CODEX_CLI_ARGS`
    - `CODEX_CLI_TIMEOUT_MS`
-   - `CODEX_MOCK_FALLBACK`
    - `CODEX_HISTORY_ENABLED`
    - `CODEX_HISTORY_DIR`
    - `CODEX_HISTORY_SCAN_TTL_MS`
@@ -31,32 +29,44 @@
 3. 日志目录可写，磁盘空间充足。
 4. 对外暴露场景下反向代理与鉴权已配置。
 
-## 4. 启动与停止（模板）
-以下命令为模板，待可执行文件或启动脚本确定后替换。
+## 4. 启动与停止（推荐使用脚本）
+在仓库根目录执行（默认端口 `8082`）：
 
-启动后端（示例）：
+启动：
 ```bash
-./agent-session-web-gateway-server --config ./config/config.yaml
+./scripts/aswg up
 ```
 
-停止后端（示例）：
+停止：
 ```bash
-pkill -f agent-session-web-gateway-server
+./scripts/aswg down
 ```
 
-启动前端静态服务（示例）：
+重启：
 ```bash
-./agent-session-web-gateway-frontend --config ./config/frontend.yaml
+./scripts/aswg restart
+```
+
+状态与日志：
+```bash
+./scripts/aswg status
+./scripts/aswg logs
+./scripts/aswg logs -f
+```
+
+环境体检：
+```bash
+./scripts/aswg doctor
 ```
 
 ## 5. 常规巡检
 1. 健康检查：
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/health
+curl -s http://127.0.0.1:8082/api/v1/health
 ```
 2. 适配器可用性：
 ```bash
-curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/adapters
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:8082/api/v1/adapters
 ```
 3. WebSocket 订阅连通性：
    - 至少验证一条会话可收到 `heartbeat` 帧。

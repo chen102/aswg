@@ -20,17 +20,18 @@
 1. `docs/project-preparation-report.md`：项目前期准备报告。
 2. `docs/architecture.md`：架构说明。
 3. `docs/configuration.md`：配置说明。
-4. `docs/api.md`：API 规范（草案）。
-5. `docs/api-contract-v1.md`：API 字段级契约（v1）。
-6. `docs/adapter-conformance-test.md`：适配器一致性测试规范。
-7. `docs/test-plan-mvp.md`：MVP 测试计划。
-8. `docs/ops-runbook.md`：运维 Runbook（MVP）。
-9. `docs/release-checklist.md`：发布清单。
-10. `docs/glossary.md`：术语表。
-11. `docs/drawio-mcp.md`：Drawio MCP 部署说明。
-12. `docs/diagrams/README.md`：Drawio 图文件清单。
-13. `docs/workflows/drawio-doc-workflow.md`：Drawio 画图与文档 SOP。
-14. `docs/resume-smoke.jsonl`：脱敏的事件流示例。
+4. `docs/deployment.md`：部署文档（开箱即用）。
+5. `docs/api.md`：API 规范（草案）。
+6. `docs/api-contract-v1.md`：API 字段级契约（v1）。
+7. `docs/adapter-conformance-test.md`：适配器一致性测试规范。
+8. `docs/test-plan-mvp.md`：MVP 测试计划。
+9. `docs/ops-runbook.md`：运维 Runbook（MVP）。
+10. `docs/release-checklist.md`：发布清单。
+11. `docs/glossary.md`：术语表。
+12. `docs/drawio-mcp.md`：Drawio MCP 部署说明。
+13. `docs/diagrams/README.md`：Drawio 图文件清单。
+14. `docs/workflows/drawio-doc-workflow.md`：Drawio 画图与文档 SOP。
+15. `docs/resume-smoke.jsonl`：脱敏的事件流示例。
 
 ## 开源治理文件
 1. `LICENSE`
@@ -40,169 +41,75 @@
 
 ## 配置要求（前端）
 前端必须支持运行时配置以下参数：
-1. `api_base_url`，示例：`http://127.0.0.1:8080`
-2. `ws_base_url`，示例：`ws://127.0.0.1:8080`
+1. `api_base_url`，示例：`http://127.0.0.1:8082`
+2. `ws_base_url`，示例：`ws://127.0.0.1:8082`
 3. `default_adapter`，示例：`codex`
 
 建议通过 `frontend/src/runtime-config.json` + `localStorage` 覆盖的方式实现，避免每次变更都重新构建前端。
 
-## 快速开始（10 分钟）
+## 快速开始（开箱即用）
 
 ### 1) 前置依赖
 1. `Go >= 1.22`
-2. `codex` CLI（`real` 模式必需）
-3. 可选：`Node.js >= 20`（仅用于前端静态检查或脚本）
+2. `curl`
+3. `codex` CLI（仅 `real` 模式必需）
 
 建议先确认：
 ```bash
 go version
+curl --version
 codex --version
 ```
 
-若你要使用真实流式对话（默认 `CODEX_STREAM_MODE=real`），请先确保 `codex` CLI 可正常使用。
-
-### 2) 一键启动（默认无鉴权）
+### 2) 一键启动（推荐）
 在仓库根目录执行：
 ```bash
-cd backend
-SERVER_HOST=127.0.0.1 \
-SERVER_PORT=8080 \
-AUTH_TOKEN= \
-ENABLED_ADAPTERS=codex \
-DEFAULT_ADAPTER=codex \
-CODEX_STREAM_MODE=real \
-CODEX_CLI_BIN=codex \
-CODEX_CLI_ARGS='exec --json --dangerously-bypass-approvals-and-sandbox' \
-FRONTEND_DIR=../frontend/src \
-go run ./cmd/server
+./scripts/aswg up
 ```
 
-启动后访问：
-`http://127.0.0.1:8080`
+默认监听 `127.0.0.1:8082`，启动后访问：`http://127.0.0.1:8082`
 
-### 2.1) 本地 Pico 联调（可选）
-如果你要本地验证 `picoclaw` adapter，可先启动 mock pico 服务：
+### 3) 常用命令
 ```bash
-cd backend
-MOCK_PICO_HOST=127.0.0.1 \
-MOCK_PICO_PORT=18081 \
-MOCK_PICO_TOKEN=pico-dev-token \
-go run ./cmd/mock-pico
+./scripts/aswg status     # 查看进程 / 端口 / 健康状态
+./scripts/aswg logs       # 查看最近日志
+./scripts/aswg logs -f    # 持续跟踪日志
+./scripts/aswg restart    # 重启
+./scripts/aswg down       # 停止
+./scripts/aswg doctor     # 依赖与环境体检
 ```
 
-再启动后端：
+### 4) 配置方式
+推荐使用本地配置文件：
 ```bash
-cd backend
-SERVER_HOST=127.0.0.1 \
-SERVER_PORT=8080 \
-AUTH_TOKEN= \
-ENABLED_ADAPTERS=codex,picoclaw \
-DEFAULT_ADAPTER=picoclaw \
-PICOCLAW_WS_BASE_URL=ws://127.0.0.1:18081 \
-PICOCLAW_TOKEN=pico-dev-token \
-FRONTEND_DIR=../frontend/src \
-go run ./cmd/server
+cp .env.example .env.local
 ```
 
-完整操作可参考：`docs/dev-smoke-picoclaw.md`。
-
-如需同时启用 PicoClaw 适配器（连接外部 Pico channel）：
+修改 `.env.local` 后执行：
 ```bash
-cd backend
-SERVER_HOST=127.0.0.1 \
-SERVER_PORT=8080 \
-AUTH_TOKEN= \
-ENABLED_ADAPTERS=codex,picoclaw \
-DEFAULT_ADAPTER=codex \
-CODEX_STREAM_MODE=real \
-CODEX_CLI_BIN=codex \
-CODEX_CLI_ARGS='exec --json --dangerously-bypass-approvals-and-sandbox' \
-PICOCLAW_WS_BASE_URL=ws://127.0.0.1:8081 \
-PICOCLAW_TOKEN=replace-with-your-pico-token \
-FRONTEND_DIR=../frontend/src \
-go run ./cmd/server
+./scripts/aswg restart
 ```
 
-### 3) 最小联调链路
-1. 设置页点击“连接测试”。
-2. 会话列表选择 `codex` 会话。
-3. 输入 prompt 后执行 `continue`。
-4. 观察消息气泡与 WebSocket 实时流式更新。
+也可单次参数覆盖：
+```bash
+./scripts/aswg up --port 18080
+./scripts/aswg restart --host 0.0.0.0 --port 8082
+./scripts/aswg restart --auth-token 'replace-with-your-token'
+```
 
-### 4) API 快速自检
+### 5) API 快速自检
 无鉴权模式：
 ```bash
-curl -sS http://127.0.0.1:8080/api/v1/health
-curl -sS http://127.0.0.1:8080/api/v1/adapters
-curl -sS 'http://127.0.0.1:8080/api/v1/adapters/codex/sessions?limit=20'
+curl -sS http://127.0.0.1:8082/api/v1/health
+curl -sS http://127.0.0.1:8082/api/v1/adapters
+curl -sS 'http://127.0.0.1:8082/api/v1/adapters/codex/sessions?limit=20'
 ```
 
-### 5) 开启鉴权（生产/公网建议）
-启动时设置：
-```bash
-AUTH_TOKEN='replace-with-your-token'
-```
-
-调用 REST：
-```bash
-curl -sS -H 'Authorization: Bearer replace-with-your-token' \
-  http://127.0.0.1:8080/api/v1/adapters
-```
-
-浏览器 WebSocket（Query 方式）：
-```text
-ws://127.0.0.1:8080/ws/v1/adapters/codex/sessions/<session_id>?access_token=replace-with-your-token
-```
-
-### 6) 局域网/公网访问
-1. 局域网访问请将服务监听到所有网卡：
-```bash
-SERVER_HOST=0.0.0.0
-```
-2. 前端设置页中：
-   - `api_base_url` 填 `http://<可访问IP>:<端口>`
-   - `ws_base_url` 填 `ws://<可访问IP>:<端口>`
-3. 反向代理或 FRP 场景（例如公网 `8081` 映射到本地 `8080`）：
-   - `api_base_url=http://<公网IP或域名>:8081`
-   - `ws_base_url=ws://<公网IP或域名>:8081`
-4. 若公网是 HTTPS，请对应使用 `https://` 与 `wss://`，避免浏览器 mixed-content 拦截。
-
-### 7) 常见问题
-1. `Failed to fetch`
-   - 检查服务是否已启动、`api_base_url` 是否可达、`AUTH_TOKEN` 是否匹配。
-2. WebSocket 连接失败或 `4010 unauthorized`
-   - 检查 `ws_base_url`、`access_token` 或 `Authorization` Header 是否正确。
-3. `codex: command not found` 或 real 模式没有 AI 回复
-   - 安装/修复 `codex` CLI，或临时切换 `CODEX_STREAM_MODE=mock` 做联调。
-4. `git push` 报 `Permission denied (publickey)`
-   - 检查 SSH key 是否已加入 GitHub，或改用 HTTPS + PAT。
-
-### 8) MVP 常用环境变量
-1. `SERVER_HOST`（默认 `127.0.0.1`）
-2. `SERVER_PORT`（默认 `8080`）
-3. `AUTH_TOKEN`（为空时不强制鉴权）
-4. `ENABLED_ADAPTERS`（默认 `codex`）
-5. `DEFAULT_ADAPTER`（默认 `codex`）
-6. `CODEX_SEED_FILE`（默认 `docs/resume-smoke.jsonl`）
-7. `FRONTEND_DIR`（默认 `frontend/src`）
-8. `RATE_LIMIT_SESSIONS_PER_SEC`（默认 `30`，`0` 表示关闭）
-9. `CODEX_STREAM_MODE`（`real|mock`，默认 `real`）
-10. `CODEX_CLI_BIN`（默认 `codex`）
-11. `CODEX_CLI_ARGS`（默认 `exec --json --dangerously-bypass-approvals-and-sandbox`）
-12. `CODEX_CLI_TIMEOUT_MS`（默认 `300000`）
-13. `CODEX_MOCK_FALLBACK`（默认 `false`）
-14. `CODEX_HISTORY_ENABLED`（默认 `true`）
-15. `CODEX_HISTORY_DIR`（默认 `~/.codex/sessions`）
-16. `CODEX_HISTORY_SCAN_TTL_MS`（默认 `5000`）
-17. `CODEX_HISTORY_ACTIVE_WINDOW_MS`（默认 `600000`，用于历史会话运行状态探测）
-18. `CODEX_HISTORY_TAIL_INTERVAL_MS`（默认 `2000`，用于历史会话事件推送轮询间隔）
-19. `PICOCLAW_WS_BASE_URL`（默认 `ws://127.0.0.1:8080`）
-20. `PICOCLAW_TOKEN`（默认空，启用 `picoclaw` 适配器时必填）
-21. `PICOCLAW_ALLOW_TOKEN_QUERY`（默认 `false`）
-22. `PICOCLAW_DIAL_TIMEOUT_MS`（默认 `5000`）
-23. `PICOCLAW_CONTINUE_TIMEOUT_MS`（默认 `120000`）
-24. `PICOCLAW_READ_IDLE_TIMEOUT_MS`（默认 `45000`）
-25. `SESSION_META_MAP_FILE`（默认 `.run/session-meta-map.json`，用于会话名称/备注/类型映射表持久化）
+### 6) 完整部署与联调说明
+1. 部署参数、局域网/公网、systemd、故障排查：`docs/deployment.md`
+2. 运维值守与告警建议：`docs/ops-runbook.md`
+3. PicoClaw 本地联调：`docs/dev-smoke-picoclaw.md`
+4. 若需手工启动，仍可使用原始方式：`cd backend && go run ./cmd/server`
 
 ## 图文档约定（Drawio）
 1. `docs/diagrams/*.drawio` 保存源文件。
@@ -222,7 +129,7 @@ Windows 也可使用：
 3. WebSocket 流式事件推送（event/heartbeat/done）。
 4. 前端设置页与连接测试能力。
 5. 前端最小闭环：列表 -> 详情 -> continue -> 流式更新。
-6. Codex continue 默认走 `real` 模式（`codex exec --json --dangerously-bypass-approvals-and-sandbox`），本地可按需启用 mock fallback。
+6. Codex continue 固定走 `real` 模式（`codex exec --json --dangerously-bypass-approvals-and-sandbox`）。
 
 ## 下一步
 1. 补齐 Go 单元测试与适配器一致性测试自动化。

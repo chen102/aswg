@@ -513,7 +513,7 @@ textarea {
   min-height: 0;
   padding: 12px;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   gap: 10px;
   overflow: hidden;
 }
@@ -536,7 +536,7 @@ textarea {
 .session-detail-title-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
 }
 
@@ -569,6 +569,10 @@ textarea {
   border: 1px solid var(--subpage-border);
   background: var(--subpage-surface);
   box-shadow: var(--subpage-highlight);
+}
+
+.conversation:not(.editor-open) .session-editor-form {
+  display: none;
 }
 
 .session-editor-head {
@@ -633,6 +637,14 @@ textarea {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.stream-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .chat-shell {
@@ -896,11 +908,27 @@ textarea {
   gap: 4px;
 }
 
+.tool-insights-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .tool-insights-head h4 {
   margin: 0;
   font-size: 0.82rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+#toggle-tool-insights,
+#tool-insights-close {
+  display: none;
+}
+
+.tool-insights.is-collapsed {
+  display: none;
 }
 
 .tool-event-list {
@@ -1488,13 +1516,205 @@ body.theme-light .text-danger {
   }
 }
 
-@media (max-width: 1280px) {
+@media (min-width: 1025px) {
+  .app-shell {
+    max-width: none;
+    padding: 14px 16px 16px;
+    gap: 12px;
+  }
+
+  .topbar {
+    min-height: 62px;
+    padding: 10px 14px;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 10px;
+  }
+
+  .brand {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 52%;
+  }
+
+  .brand p {
+    margin-top: 3px;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+  }
+
+  .topbar-actions {
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .topbar-actions .btn {
+    min-height: 34px;
+    padding: 0 10px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+
   .workspace {
-    grid-template-columns: 320px minmax(0, 1fr);
+    grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .sidebar {
+    padding: 12px;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .session-list {
+    padding-right: 2px;
+  }
+
+  .conversation {
+    padding: 12px;
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .conversation-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 10px;
+    row-gap: 4px;
+    align-items: start;
+    max-height: none;
+    overflow: visible;
+    padding: 0 0 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .session-detail-title-row,
+  #session-meta,
+  #session-id-line,
+  #stream-status {
+    grid-column: 1;
+  }
+
+  .stream-row {
+    display: contents;
+  }
+
+  .stream-actions {
+    grid-column: 2;
+    grid-row: 1 / span 4;
+    align-self: start;
+    justify-self: end;
+    gap: 6px;
+    max-width: 380px;
+  }
+
+  .stream-actions .btn {
+    min-height: 32px;
+    padding: 0 10px;
+    font-size: 0.74rem;
+    white-space: nowrap;
+  }
+
+  .session-editor-form {
+    padding: 8px 10px;
+    border-radius: 12px;
+  }
+
+  .session-editor-body {
+    max-height: min(24dvh, 210px);
+  }
+
+  .session-editor-actions {
+    justify-content: flex-end;
+  }
+
+  #session-title {
+    font-size: 0.96rem;
+  }
+
+  #session-meta,
+  #session-id-line,
+  #stream-status {
+    font-size: 0.72rem;
   }
 
   .chat-shell {
-    grid-template-columns: minmax(0, 1fr) 260px;
+    position: relative;
+    grid-template-columns: 1fr;
+    min-height: 0;
+    border-radius: 14px;
+  }
+
+  .chat-main {
+    border-right: none;
+  }
+
+  .chat-thread {
+    padding: 16px 18px 86px;
+    gap: 10px;
+  }
+
+  .chat-bubble {
+    max-width: min(78%, 920px);
+  }
+
+  #toggle-tool-insights,
+  #tool-insights-close {
+    display: inline-flex;
+  }
+
+  #tool-insights-close {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 0.72rem;
+  }
+
+  .tool-insights {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 9;
+    width: min(350px, 44%);
+    max-height: calc(100% - 20px);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 20px 40px rgba(2, 6, 23, 0.38);
+    background: var(--panel-strong);
+  }
+
+  .tool-insights-head {
+    position: sticky;
+    top: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tool-event-list {
+    min-height: 220px;
+    max-height: min(46dvh, 440px);
+    padding: 10px;
+  }
+
+  .continue-form {
+    padding-top: 8px;
+    gap: 10px;
+  }
+
+  #continue-prompt {
+    min-height: 72px;
+    max-height: min(26dvh, 240px);
+  }
+}
+
+@media (max-width: 1280px) {
+  .workspace {
+    grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+  }
+
+  .chat-shell {
+    grid-template-columns: 1fr;
   }
 
   .settings-grid-inner {
@@ -2029,7 +2249,8 @@ body.theme-light .text-danger {
   }
 
   body.viewport-mobile #delete-session-button,
-  body.viewport-mobile #reconnect-stream {
+  body.viewport-mobile #reconnect-stream,
+  body.viewport-mobile .stream-actions #session-editor-toggle {
     display: none;
   }
 

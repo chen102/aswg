@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_DIR="${ROOT_DIR}/.run"
+PID_FILE="${RUN_DIR}/aswg.pid"
+LOG_FILE="${RUN_DIR}/aswg.log"
+BIN_FILE="${RUN_DIR}/aswg-server"
+ENV_FILE_LOCAL="${ROOT_DIR}/.env.local"
+ENV_FILE_DEFAULT="${ROOT_DIR}/.env"
+
+SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
+SERVER_PORT="${SERVER_PORT:-8082}"
+AUTH_TOKEN="${AUTH_TOKEN:-}"
+ENABLED_ADAPTERS="${ENABLED_ADAPTERS:-codex}"
+DEFAULT_ADAPTER="${DEFAULT_ADAPTER:-codex}"
+CODEX_CLI_BIN="${CODEX_CLI_BIN:-codex}"
+CODEX_CLI_ARGS="${CODEX_CLI_ARGS:-exec --json --dangerously-bypass-approvals-and-sandbox}"
+CODEX_CLI_TIMEOUT_MS="${CODEX_CLI_TIMEOUT_MS:-1800000}"
+CODEX_HISTORY_ENABLED="${CODEX_HISTORY_ENABLED:-true}"
+CODEX_HISTORY_DIR="${CODEX_HISTORY_DIR:-$HOME/.codex/sessions}"
+CODEX_HISTORY_SCAN_TTL_MS="${CODEX_HISTORY_SCAN_TTL_MS:-5000}"
+CODEX_HISTORY_ACTIVE_WINDOW_MS="${CODEX_HISTORY_ACTIVE_WINDOW_MS:-1800000}"
+CODEX_HISTORY_TAIL_INTERVAL_MS="${CODEX_HISTORY_TAIL_INTERVAL_MS:-2000}"
+SESSION_META_MAP_FILE="${SESSION_META_MAP_FILE:-.run/session-meta-map.json}"
+RATE_LIMIT_SESSIONS_PER_SEC="${RATE_LIMIT_SESSIONS_PER_SEC:-30}"
+FRONTEND_DIR="${FRONTEND_DIR:-../frontend/src}"
+CODEX_STREAM_MODE="real"
+CODEX_MOCK_FALLBACK="false"
+
+NO_WAIT=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/aswg up [options]
+  ./scripts/aswg down
+  ./scripts/aswg restart [options]
+  ./scripts/aswg status
+  ./scripts/aswg logs [-f]
+  ./scripts/aswg doctor
+
+Commands:
+  up       Start gateway in background and wait for /api/v1/health.
+  down     Stop gateway started by this script.
+  restart  Restart gateway (down + up).
+  status   Show process, port, and health status.
+  logs     Show latest logs (use -f to follow).
+  doctor   Check runtime dependencies and environment.
+
+Options for up/restart:
+  --host <host>              SERVER_HOST (default: 127.0.0.1)
+  --port <port>              SERVER_PORT (default: 8082)
+  --adapters <list>          ENABLED_ADAPTERS (default: codex)
+  --default-adapter <name>   DEFAULT_ADAPTER (default: codex)
+  --auth-token <token>       AUTH_TOKEN (default: empty)
+  --no-wait                  Do not wait for health check.
+  -h, --help                 Show help.
+
+Environment files:
+  1) .env
+  2) .env.local
+  Values in .env.local override .env, command-line options override both.
+EOF
+}
+
+log() {
+  printf '[aswg] %s\n' "$*"
+}
+
+die() {
+  printf '[aswg] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+load_env_files() {
+  if [[ -f "${ENV_FILE_DEFAULT}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE_DEFAULT}"
+    set +a
+  fi
+  if [[ -f "${ENV_FILE_LOCAL}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE_LOCAL}"
+    set +a
+  fi
+}
+
+parse_up_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)
+        [[ $# -ge 2 ]] || die "missing value for --host"
+        SERVER_HOST="$2"
+        shift 2
+        ;;
+      --port)
+        [[ $# -ge 2 ]] || die "missing value for --port"
+        SERVER_PORT="$2"
+        shift 2
+        ;;
+      --adapters)
+        [[ $# -ge 2 ]] || die "missing value for --adapters"
+        ENABLED_ADAPTERS="$2"
+        shift 2
+        ;;
+      --default-adapter)
+        [[ $# -ge 2 ]] || die "missing value for --default-adapter"
+        DEFAULT_ADAPTER="$2"
+        shift 2
+        ;;
+      --auth-token)
+        [[ $# -ge 2 ]] || die "missing value for --auth-token"
+        AUTH_TOKEN="$2"
+        shift 2
+        ;;
+      --no-wait)
+        NO_WAIT=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+}
+
+find_listen_pid() {
+  local port="$1"
+  local pid=""
+  if command_exists lsof; then
+    pid="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+  elif command_exists ss; then
+    pid="$(ss -ltnp "( sport = :${port} )" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2 || true)"
+  fi
+  printf '%s' "${pid}"
+}
+
+pid_running() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  kill -0 "${pid}" 2>/dev/null
+}
+
+read_pid_file() {
+  if [[ -f "${PID_FILE}" ]]; then
+    tr -d '[:space:]' < "${PID_FILE}"
+  fi
+}
+
+validate_runtime() {
+  command_exists go || die "go not found. Please install Go >= 1.22"
+  command_exists curl || die "curl not found. Please install curl."
+  command_exists "${CODEX_CLI_BIN}" || die "${CODEX_CLI_BIN} not found (real mode only)"
+}
+
+wait_for_health() {
+  local host="$1"
+  local port="$2"
+  local url="http://${host}:${port}/api/v1/health"
+  local attempts=40
+  local i
+  for ((i=1; i<=attempts; i++)); do
+    if curl -fsS "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+start_server() {
+  mkdir -p "${RUN_DIR}"
+  validate_runtime
+
+  local existing_pid
+  existing_pid="$(read_pid_file || true)"
+  if pid_running "${existing_pid}"; then
+    log "already running (pid=${existing_pid})"
+    status_server
+    return 0
+  fi
+
+  local port_pid
+  port_pid="$(find_listen_pid "${SERVER_PORT}")"
+  if [[ -n "${port_pid}" ]]; then
+    die "port ${SERVER_PORT} is already in use by pid=${port_pid}. Use another --port or stop that process first."
+  fi
+
+  : > "${LOG_FILE}"
+  log "building server binary..."
+  (
+    cd "${ROOT_DIR}/backend"
+    go build -o "${BIN_FILE}" ./cmd/server >> "${LOG_FILE}" 2>&1
+  ) || {
+    tail -n 80 "${LOG_FILE}" >&2 || true
+    die "build failed"
+  }
+
+  log "starting gateway..."
+  cd "${ROOT_DIR}/backend"
+  env \
+    SERVER_HOST="${SERVER_HOST}" \
+    SERVER_PORT="${SERVER_PORT}" \
+    AUTH_TOKEN="${AUTH_TOKEN}" \
+    ENABLED_ADAPTERS="${ENABLED_ADAPTERS}" \
+    DEFAULT_ADAPTER="${DEFAULT_ADAPTER}" \
+    FRONTEND_DIR="${FRONTEND_DIR}" \
+    SESSION_META_MAP_FILE="${SESSION_META_MAP_FILE}" \
+    RATE_LIMIT_SESSIONS_PER_SEC="${RATE_LIMIT_SESSIONS_PER_SEC}" \
+    CODEX_STREAM_MODE="${CODEX_STREAM_MODE}" \
+    CODEX_CLI_BIN="${CODEX_CLI_BIN}" \
+    CODEX_CLI_ARGS="${CODEX_CLI_ARGS}" \
+    CODEX_CLI_TIMEOUT_MS="${CODEX_CLI_TIMEOUT_MS}" \
+    CODEX_MOCK_FALLBACK="${CODEX_MOCK_FALLBACK}" \
+    CODEX_HISTORY_ENABLED="${CODEX_HISTORY_ENABLED}" \
+    CODEX_HISTORY_DIR="${CODEX_HISTORY_DIR}" \
+    CODEX_HISTORY_SCAN_TTL_MS="${CODEX_HISTORY_SCAN_TTL_MS}" \
+    CODEX_HISTORY_ACTIVE_WINDOW_MS="${CODEX_HISTORY_ACTIVE_WINDOW_MS}" \
+    CODEX_HISTORY_TAIL_INTERVAL_MS="${CODEX_HISTORY_TAIL_INTERVAL_MS}" \
+    "${BIN_FILE}" >> "${LOG_FILE}" 2>&1 &
+  local new_pid=$!
+  cd "${ROOT_DIR}"
+  echo "${new_pid}" > "${PID_FILE}"
+
+  if [[ "${NO_WAIT}" -eq 1 ]]; then
+    log "started pid=${new_pid} (no-wait)"
+    log "logs: ${LOG_FILE}"
+    return 0
+  fi
+
+  if wait_for_health "${SERVER_HOST}" "${SERVER_PORT}"; then
+    log "started successfully"
+    log "URL: http://${SERVER_HOST}:${SERVER_PORT}"
+    log "health: http://${SERVER_HOST}:${SERVER_PORT}/api/v1/health"
+    log "logs: ${LOG_FILE}"
+    return 0
+  fi
+
+  kill "${new_pid}" 2>/dev/null || true
+  rm -f "${PID_FILE}"
+  tail -n 80 "${LOG_FILE}" >&2 || true
+  die "startup failed: health check timeout"
+}
+
+stop_server() {
+  local pid
+  pid="$(read_pid_file || true)"
+  local port_pid
+  port_pid="$(find_listen_pid "${SERVER_PORT}")"
+
+  if ! pid_running "${pid}" && [[ -z "${port_pid}" ]]; then
+    rm -f "${PID_FILE}"
+    log "not running"
+    return 0
+  fi
+
+  if pid_running "${pid}"; then
+    log "stopping pid=${pid}..."
+    kill "${pid}" 2>/dev/null || true
+    local i
+    for ((i=1; i<=20; i++)); do
+      if ! pid_running "${pid}"; then
+        break
+      fi
+      sleep 0.2
+    done
+    if pid_running "${pid}"; then
+      log "force killing pid=${pid}"
+      kill -9 "${pid}" 2>/dev/null || true
+    fi
+  fi
+
+  port_pid="$(find_listen_pid "${SERVER_PORT}")"
+  if [[ -n "${port_pid}" ]] && [[ "${port_pid}" != "${pid}" ]]; then
+    log "stopping remaining listener pid=${port_pid} on port ${SERVER_PORT}..."
+    kill "${port_pid}" 2>/dev/null || true
+    sleep 0.3
+    if pid_running "${port_pid}"; then
+      kill -9 "${port_pid}" 2>/dev/null || true
+    fi
+  fi
+
+  rm -f "${PID_FILE}"
+  log "stopped"
+}
+
+status_server() {
+  local pid
+  pid="$(read_pid_file || true)"
+  local running="false"
+  if pid_running "${pid}"; then
+    running="true"
+  fi
+
+  local port_pid
+  port_pid="$(find_listen_pid "${SERVER_PORT}")"
+  local url="http://${SERVER_HOST}:${SERVER_PORT}/api/v1/health"
+  local health="down"
+  if curl -fsS "${url}" >/dev/null 2>&1; then
+    health="up"
+  fi
+
+  log "running=${running}"
+  log "pid_file=${PID_FILE}"
+  log "pid=${pid:-<none>}"
+  log "port=${SERVER_PORT}"
+  log "port_pid=${port_pid:-<none>}"
+  log "health=${health} (${url})"
+  log "log_file=${LOG_FILE}"
+}
+
+show_logs() {
+  local follow="${1:-0}"
+  mkdir -p "${RUN_DIR}"
+  touch "${LOG_FILE}"
+  if [[ "${follow}" == "1" ]]; then
+    tail -n 200 -f "${LOG_FILE}"
+  else
+    tail -n 200 "${LOG_FILE}"
+  fi
+}
+
+doctor() {
+  log "root=${ROOT_DIR}"
+  log "bin_file=${BIN_FILE}"
+  log "env_file_default=$([[ -f "${ENV_FILE_DEFAULT}" ]] && echo yes || echo no)"
+  log "env_file_local=$([[ -f "${ENV_FILE_LOCAL}" ]] && echo yes || echo no)"
+  if command_exists go; then
+    log "go=$(go version)"
+  else
+    log "go=missing"
+  fi
+  if command_exists curl; then
+    log "curl=$(curl --version | head -n 1)"
+  else
+    log "curl=missing"
+  fi
+  if command_exists "${CODEX_CLI_BIN}"; then
+    log "codex_cli=${CODEX_CLI_BIN} (ok)"
+  else
+    log "codex_cli=${CODEX_CLI_BIN} (missing)"
+  fi
+  local port_pid
+  port_pid="$(find_listen_pid "${SERVER_PORT}")"
+  log "target_port=${SERVER_PORT} ($([[ -n "${port_pid}" ]] && echo "occupied by pid ${port_pid}" || echo "available"))"
+  local frontend_probe=""
+  if [[ "${FRONTEND_DIR}" == /* ]]; then
+    frontend_probe="${FRONTEND_DIR}/index.html"
+  else
+    frontend_probe="${ROOT_DIR}/backend/${FRONTEND_DIR}/index.html"
+  fi
+  if [[ -f "${frontend_probe}" ]]; then
+    log "frontend_dir=ok (${frontend_probe})"
+  else
+    log "frontend_dir=missing (${frontend_probe})"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  load_env_files
+  CODEX_STREAM_MODE="real"
+  CODEX_MOCK_FALLBACK="false"
+
+  case "${cmd}" in
+    up)
+      parse_up_args "$@"
+      start_server
+      ;;
+    down)
+      stop_server
+      ;;
+    restart)
+      parse_up_args "$@"
+      stop_server
+      start_server
+      ;;
+    status)
+      status_server
+      ;;
+    logs)
+      if [[ "${1:-}" == "-f" ]]; then
+        show_logs 1
+      else
+        show_logs 0
+      fi
+      ;;
+    doctor)
+      doctor
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      die "unknown command: ${cmd}"
+      ;;
+  esac
+}
+
+main "$@"

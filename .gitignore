@@ -19,6 +19,7 @@ backend/.run/
 test-results/
 
 # Local secrets / machine-specific files
+.env.local
 *.key
 *.keys
 *.pem

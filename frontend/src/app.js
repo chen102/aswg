@@ -6,6 +6,8 @@ const APP_BRAND_SUBTITLE_DEFAULT = "AI-Native Control Surface";
 const SESSION_POLL_INTERVAL_MS = 3000;
 const DEFAULT_SESSION_TYPES = ["项目", "需求", "bug修复", "问题拆解"];
 const MOBILE_VIEWS = new Set(["chat", "sessions", "create", "editor"]);
+const MOBILE_WIDTH_QUERY = "(max-width: 1024px)";
+const MOBILE_POINTER_QUERY = "(hover: none) and (pointer: coarse)";
 
 const state = {
   defaults: null,
@@ -30,6 +32,8 @@ const state = {
   theme: "dark",
   sessionEditorCollapsed: true,
   mobileView: "chat",
+  toolInsightsOpen: false,
+  viewportSyncScheduled: false,
 };
 
 const el = {
@@ -91,7 +95,10 @@ const el = {
   conversation: document.querySelector(".conversation"),
   conversationHead: document.querySelector(".conversation-head"),
   chatThread: document.getElementById("chat-thread"),
+  toolInsights: document.querySelector(".tool-insights"),
   toolEventList: document.getElementById("tool-event-list"),
+  toggleToolInsights: document.getElementById("toggle-tool-insights"),
+  toolInsightsClose: document.getElementById("tool-insights-close"),
   continueForm: document.getElementById("continue-form"),
   continuePrompt: document.getElementById("continue-prompt"),
   continueSubmit: document.getElementById("continue-submit"),
@@ -120,6 +127,7 @@ async function bootstrap() {
   switchSettingsTab("connection");
   bindEvents();
   bindChatNavigation();
+  bindViewportEvents();
   toggleSettingsPanel(false);
   toggleSidebar(false);
   setStreamStatus("WS 未连接", false);
@@ -141,7 +149,45 @@ function sessionStatusLabel(status) {
 }
 
 function isMobileViewport() {
-  return window.matchMedia("(max-width: 1024px)").matches;
+  const widthMatch = window.matchMedia(MOBILE_WIDTH_QUERY).matches;
+  const pointerMatch = window.matchMedia(MOBILE_POINTER_QUERY).matches;
+  return widthMatch || pointerMatch;
+}
+
+function scheduleViewportSync() {
+  if (state.viewportSyncScheduled) {
+    return;
+  }
+  state.viewportSyncScheduled = true;
+  window.requestAnimationFrame(() => {
+    state.viewportSyncScheduled = false;
+    syncViewportModeClass();
+    if (!isMobileViewport()) {
+      toggleSidebar(false);
+      toggleSettingsPanel(false);
+    }
+  });
+}
+
+function bindViewportEvents() {
+  window.addEventListener("resize", scheduleViewportSync, { passive: true });
+  window.addEventListener("orientationchange", scheduleViewportSync, { passive: true });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", scheduleViewportSync, { passive: true });
+  }
+
+  const widthMQL = window.matchMedia(MOBILE_WIDTH_QUERY);
+  const pointerMQL = window.matchMedia(MOBILE_POINTER_QUERY);
+  if (typeof widthMQL.addEventListener === "function") {
+    widthMQL.addEventListener("change", scheduleViewportSync);
+    pointerMQL.addEventListener("change", scheduleViewportSync);
+    return;
+  }
+  if (typeof widthMQL.addListener === "function") {
+    widthMQL.addListener(scheduleViewportSync);
+    pointerMQL.addListener(scheduleViewportSync);
+  }
 }
 
 function syncViewportModeClass() {
@@ -160,6 +206,7 @@ function syncViewportModeClass() {
     }
     applyMobileViewClass();
   }
+  applyToolInsightsVisibility();
   updateMobileBrand();
 }
 
@@ -291,6 +338,28 @@ function updateMobileBrand() {
   syncMobileTopbarHeight();
 }
 
+function applyToolInsightsVisibility(forceOpen) {
+  if (!el.toolInsights) {
+    return;
+  }
+  const desktop = !isMobileViewport();
+  let nextOpen = state.toolInsightsOpen;
+  if (typeof forceOpen === "boolean") {
+    nextOpen = forceOpen;
+  } else if (!desktop) {
+    nextOpen = false;
+  }
+  if (!desktop) {
+    nextOpen = false;
+  }
+  state.toolInsightsOpen = Boolean(nextOpen);
+  el.toolInsights.classList.toggle("is-collapsed", !state.toolInsightsOpen);
+  if (el.toggleToolInsights) {
+    el.toggleToolInsights.setAttribute("aria-expanded", state.toolInsightsOpen ? "true" : "false");
+    el.toggleToolInsights.textContent = state.toolInsightsOpen ? "收起轨迹" : "工具轨迹";
+  }
+}
+
 function toggleSettingsPanel(forceOpen) {
   if (!el.settingsPanel) {
     return;
@@ -352,6 +421,18 @@ function bindEvents() {
       const next = state.theme === "light" ? "dark" : "light";
       applyTheme(next);
       saveTheme(next);
+    });
+  }
+
+  if (el.toggleToolInsights) {
+    el.toggleToolInsights.addEventListener("click", () => {
+      applyToolInsightsVisibility(!state.toolInsightsOpen);
+    });
+  }
+
+  if (el.toolInsightsClose) {
+    el.toolInsightsClose.addEventListener("click", () => {
+      applyToolInsightsVisibility(false);
     });
   }
 
@@ -455,14 +536,6 @@ function bindEvents() {
       toggleSidebar(false);
     });
   }
-
-  window.addEventListener("resize", () => {
-    syncViewportModeClass();
-    if (!isMobileViewport()) {
-      toggleSidebar(false);
-      toggleSettingsPanel(false);
-    }
-  });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") {

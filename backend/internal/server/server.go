@@ -955,11 +955,25 @@ func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 		header = append(header, tmp...)
 	}
 
-	if _, err := c.conn.Write(header); err != nil {
+	if err := writeAll(c.conn, header); err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(payload); err != nil {
+	if err := writeAll(c.conn, payload); err != nil {
 		return err
+	}
+	return nil
+}
+
+func writeAll(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
 	}
 	return nil
 }

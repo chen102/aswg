@@ -33,9 +33,9 @@ const (
 	defaultCLIBin        = "codex"
 	defaultCLIArgs       = "exec --json --dangerously-bypass-approvals-and-sandbox"
 	cliBypassFlag        = "--dangerously-bypass-approvals-and-sandbox"
-	defaultCLITimeout    = 5 * time.Minute
+	defaultCLITimeout    = 30 * time.Minute
 	defaultHistoryTTL    = 5 * time.Second
-	defaultHistoryWindow = 10 * time.Minute
+	defaultHistoryWindow = 30 * time.Minute
 	defaultHistoryTail   = 2 * time.Second
 	defaultHistorySource = "history"
 	sessionStatusIdle    = "idle"
@@ -1133,7 +1133,8 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 		source    string
 		title     string
 	)
-	activeTurns := make(map[string]time.Time)
+	activeTurnID := ""
+	activeTurnAt := time.Time{}
 	sawTaskEvents := false
 
 	scanner := newJSONLScanner(f)
@@ -1155,6 +1156,11 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 			}
 			if ts.After(updatedAt) {
 				updatedAt = ts
+			}
+			// While a turn is active, treat any newer session signal as liveness
+			// heartbeat, not only the initial task_started timestamp.
+			if activeTurnID != "" && (activeTurnAt.IsZero() || ts.After(activeTurnAt)) {
+				activeTurnAt = ts
 			}
 		}
 
@@ -1198,19 +1204,49 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 			}
 			eventType := strings.ToLower(strings.TrimSpace(evt.Type))
 			turnID := strings.TrimSpace(evt.TurnID)
-			if eventType == "" || turnID == "" {
+			if eventType == "" {
 				continue
 			}
+
+			isTaskStart := eventType == "task_started" ||
+				eventType == "turn_started" ||
+				strings.HasSuffix(eventType, "_started") ||
+				strings.HasSuffix(eventType, ".started")
+			isTaskEnd := eventType == "task_complete" ||
+				eventType == "task_completed" ||
+				eventType == "agent_message" ||
+				eventType == "assistant_message" ||
+				eventType == "turn_aborted" ||
+				eventType == "task_aborted" ||
+				eventType == "task_failed" ||
+				eventType == "task_error" ||
+				strings.HasSuffix(eventType, "aborted") ||
+				strings.HasSuffix(eventType, "complete") ||
+				strings.HasSuffix(eventType, "completed") ||
+				strings.HasSuffix(eventType, "failed") ||
+				strings.HasSuffix(eventType, "error")
+			if !isTaskStart && !isTaskEnd {
+				continue
+			}
+
 			sawTaskEvents = true
-			switch eventType {
-			case "task_started":
-				activeTurns[turnID] = ts
-			case "task_complete", "task_completed", "turn_aborted", "task_aborted", "task_failed", "task_error":
-				delete(activeTurns, turnID)
-			default:
-				if strings.HasSuffix(eventType, "aborted") || strings.HasSuffix(eventType, "complete") || strings.HasSuffix(eventType, "completed") || strings.HasSuffix(eventType, "failed") || strings.HasSuffix(eventType, "error") {
-					delete(activeTurns, turnID)
-				}
+			if ts.IsZero() {
+				ts = updatedAt
+			}
+			if ts.IsZero() {
+				ts = modTime
+			}
+
+			if isTaskStart {
+				activeTurnID = turnID
+				activeTurnAt = ts
+				continue
+			}
+			// A terminal event without turn_id (or with a mismatched one) still
+			// means the active turn likely finished, so clear running state.
+			if turnID == "" || activeTurnID == "" || turnID == activeTurnID || (!ts.IsZero() && (activeTurnAt.IsZero() || !ts.Before(activeTurnAt))) {
+				activeTurnID = ""
+				activeTurnAt = time.Time{}
 			}
 		}
 	}
@@ -1227,6 +1263,9 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 	if createdAt.IsZero() {
 		createdAt = updatedAt
 	}
+	if activeTurnID != "" && !modTime.IsZero() && modTime.After(activeTurnAt) {
+		activeTurnAt = modTime
+	}
 	if source == "" {
 		source = defaultHistorySource
 	}
@@ -1235,18 +1274,17 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 	}
 
 	hasRecentActiveTurn := false
-	for _, startedAt := range activeTurns {
+	if activeTurnID != "" || !activeTurnAt.IsZero() {
 		if activeWindow <= 0 {
 			hasRecentActiveTurn = true
-			break
-		}
-		turnTS := startedAt
-		if turnTS.IsZero() {
-			turnTS = updatedAt
-		}
-		if !turnTS.IsZero() && time.Since(turnTS) <= activeWindow {
-			hasRecentActiveTurn = true
-			break
+		} else {
+			turnTS := activeTurnAt
+			if turnTS.IsZero() {
+				turnTS = updatedAt
+			}
+			if !turnTS.IsZero() && time.Since(turnTS) <= activeWindow {
+				hasRecentActiveTurn = true
+			}
 		}
 	}
 
@@ -1544,6 +1582,7 @@ func (a *Adapter) emitRealContinueEvents(ctx context.Context, sessionID, prompt 
 	approvalBlocked := false
 	approvalHintSent := false
 	detectedThreadID := strings.TrimSpace(threadID)
+	sawCompletionEvent := false
 
 	for item := range lineCh {
 		if item.source == "stderr" {
@@ -1570,6 +1609,9 @@ func (a *Adapter) emitRealContinueEvents(ctx context.Context, sessionID, prompt 
 		eventType, chunks, eventErr, approvalRequired := parseCLIJSONLine(item.line)
 		if eventErr != "" {
 			errLines = append(errLines, eventErr)
+		}
+		if isCLICompletionEvent(eventType, item.line) {
+			sawCompletionEvent = true
 		}
 		if tid := parseCLIThreadID(eventType, item.line); tid != "" {
 			a.setSessionThreadID(sessionID, tid)
@@ -1612,6 +1654,14 @@ func (a *Adapter) emitRealContinueEvents(ctx context.Context, sessionID, prompt 
 
 	waitErr := cmd.Wait()
 	if runCtx.Err() == context.DeadlineExceeded {
+		if sawCompletionEvent && deltaCount > 0 {
+			a.appendAssistantDone(sessionID, "", map[string]any{
+				"raw_type": "assistant_done",
+				"source":   "cli",
+				"reason":   "synthesized_after_timeout",
+			})
+			return streamResult{deltaCount: deltaCount}
+		}
 		return streamResult{deltaCount: deltaCount, err: fmt.Errorf("codex cli timeout after %s", a.cliTimeout)}
 	}
 	if ctx.Err() != nil {
@@ -1711,23 +1761,24 @@ func summarizeCLIAction(eventType, rawLine string) string {
 			return formatActionLabel(classifyActionKind(itemType, name, ""), name, completed)
 		case "command_execution":
 			command := trimRunes(firstNonEmptyString(item, "command"), 56)
+			kind := classifyActionKind(itemType, "", command)
 			exitCode, hasExitCode := asInt64(item["exit_code"])
 			if completed {
 				if command == "" {
 					if hasExitCode {
-						return fmt.Sprintf("Run ✓ (exit %d)", exitCode)
+						return fmt.Sprintf("%s ✓ (exit %d)", kind, exitCode)
 					}
-					return "Run ✓"
+					return kind + " ✓"
 				}
 				if hasExitCode {
-					return fmt.Sprintf("Run ✓ (exit %d) · %s", exitCode, command)
+					return fmt.Sprintf("%s ✓ (exit %d) · %s", kind, exitCode, command)
 				}
-				return "Run ✓ · " + command
+				return kind + " ✓ · " + command
 			}
 			if command == "" {
-				return "Run"
+				return kind
 			}
-			return "Run · " + command
+			return kind + " · " + command
 		case "agent_message", "message":
 			if completed {
 				return "回复片段已生成"
@@ -1769,6 +1820,12 @@ func classifyActionKind(itemType, name, command string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	command = strings.ToLower(strings.TrimSpace(command))
 	if itemType == "command_execution" || command != "" {
+		if isEditedCommand(command) {
+			return "Edited"
+		}
+		if isExploredCommand(command) {
+			return "Explored"
+		}
 		return "Run"
 	}
 	if isEditedActionName(name) {
@@ -1834,6 +1891,103 @@ func isExploredActionName(name string) bool {
 		}
 	}
 	return false
+}
+
+func isEditedCommand(command string) bool {
+	probe := normalizeCommandForMatch(command)
+	if probe == "" {
+		return false
+	}
+	editNeedles := []string{
+		"apply_patch",
+		" sed -i ",
+		" perl -i ",
+		" cat > ",
+		" cat >> ",
+		" tee ",
+		" mv ",
+		" cp ",
+		" rm ",
+		" mkdir ",
+		" touch ",
+		" chmod ",
+		" chown ",
+		" git add ",
+		" git commit ",
+		" git mv ",
+		" git rm ",
+		" gofmt -w ",
+		" prettier --write ",
+	}
+	for _, needle := range editNeedles {
+		if strings.Contains(probe, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExploredCommand(command string) bool {
+	probe := normalizeCommandForMatch(command)
+	if probe == "" {
+		return false
+	}
+	exploreNeedles := []string{
+		" ls ",
+		" tree ",
+		" pwd ",
+		" rg ",
+		" grep ",
+		" find ",
+		" cat ",
+		" sed -n",
+		" head ",
+		" tail ",
+		" wc ",
+		" git status",
+		" git diff",
+		" git log",
+		" git show",
+		" ps ",
+		" lsof ",
+		" ss ",
+		" stat ",
+	}
+	for _, needle := range exploreNeedles {
+		if strings.Contains(probe, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCommandForMatch(command string) string {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if command == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"'", " ",
+		"\"", " ",
+		"`", " ",
+		"(", " ",
+		")", " ",
+		"[", " ",
+		"]", " ",
+		"{", " ",
+		"}", " ",
+		";", " ",
+		"|", " ",
+		"&", " ",
+		"\n", " ",
+		"\t", " ",
+	)
+	command = replacer.Replace(command)
+	command = strings.Join(strings.Fields(command), " ")
+	if command == "" {
+		return ""
+	}
+	return " " + command + " "
 }
 
 func firstNonEmptyString(node map[string]any, keys ...string) string {
@@ -1995,6 +2149,25 @@ func parseCLIJSONLine(line string) (string, []string, string, bool) {
 
 	chunks := extractAssistantChunks(event)
 	return eventType, chunks, "", false
+}
+
+func isCLICompletionEvent(eventType, rawLine string) bool {
+	lowerType := strings.ToLower(strings.TrimSpace(eventType))
+	switch lowerType {
+	case "turn.completed", "response.completed", "task_complete", "task_completed":
+		return true
+	}
+	if lowerType != "event_msg" {
+		return false
+	}
+
+	var event map[string]any
+	if err := json.Unmarshal([]byte(rawLine), &event); err != nil {
+		return false
+	}
+	payload, _ := event["payload"].(map[string]any)
+	payloadType := strings.ToLower(strings.TrimSpace(firstNonEmptyString(payload, "type", "event_type")))
+	return payloadType == "task_complete" || payloadType == "task_completed"
 }
 
 func detectCLIApprovalPromptEvent(eventType string, event map[string]any) bool {
@@ -2573,7 +2746,11 @@ func isHistoryBackedSession(detail model.SessionDetail) bool {
 }
 
 func applyHistoryDetail(detail *model.SessionDetail, info externalSessionInfo) {
-	detail.Status = normalizeSessionStatus(info.detail.Status)
+	// Never let stale history status overwrite fresher in-memory status.
+	historyIsFresher := !info.detail.UpdatedAt.Before(detail.UpdatedAt)
+	if historyIsFresher {
+		detail.Status = normalizeSessionStatus(info.detail.Status)
+	}
 	if info.detail.UpdatedAt.After(detail.UpdatedAt) {
 		detail.UpdatedAt = info.detail.UpdatedAt
 	}
