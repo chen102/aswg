@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -17,6 +18,12 @@ type Config struct {
 	FrontendDir             string
 	SessionMetaMapFile      string
 	RateLimitSessionsPerSec int
+	PushWebhookURL          string
+	PushWebhookAuthBearer   string
+	PushWebhookHMACSecret   string
+	PushWebhookTimeout      time.Duration
+	PushQueueSize           int
+	PushDedupeTTL           time.Duration
 }
 
 func LoadConfig() Config {
@@ -69,6 +76,27 @@ func LoadConfig() Config {
 		}
 	}
 
+	pushWebhookTimeout := 3 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("PUSH_WEBHOOK_TIMEOUT_MS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			pushWebhookTimeout = time.Duration(n) * time.Millisecond
+		}
+	}
+
+	pushQueueSize := 512
+	if raw := strings.TrimSpace(os.Getenv("PUSH_QUEUE_SIZE")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			pushQueueSize = n
+		}
+	}
+
+	pushDedupeTTL := 30 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("PUSH_DEDUPE_TTL_MS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			pushDedupeTTL = time.Duration(n) * time.Millisecond
+		}
+	}
+
 	return Config{
 		Host:                    host,
 		Port:                    port,
@@ -80,6 +108,12 @@ func LoadConfig() Config {
 		FrontendDir:             frontendDir,
 		SessionMetaMapFile:      sessionMetaMapFile,
 		RateLimitSessionsPerSec: rateLimitSessionsPerSec,
+		PushWebhookURL:          strings.TrimSpace(os.Getenv("PUSH_WEBHOOK_URL")),
+		PushWebhookAuthBearer:   strings.TrimSpace(os.Getenv("PUSH_WEBHOOK_AUTH_BEARER")),
+		PushWebhookHMACSecret:   strings.TrimSpace(os.Getenv("PUSH_WEBHOOK_HMAC_SECRET")),
+		PushWebhookTimeout:      pushWebhookTimeout,
+		PushQueueSize:           pushQueueSize,
+		PushDedupeTTL:           pushDedupeTTL,
 	}
 }
 

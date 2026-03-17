@@ -20,3 +20,10 @@ type AgentAdapter interface {
 	Subscribe(ctx context.Context, sessionID string, fromSeq int64) (<-chan model.SessionEvent, func(), error)
 	HealthCheck(ctx context.Context) (int64, error)
 }
+
+// EventObserverCapable is an optional adapter extension that lets server-side
+// components (for example push-notification bridges) receive normalized events.
+// Adapters that do not implement this interface keep working unchanged.
+type EventObserverCapable interface {
+	SetEventObserver(func(model.SessionEvent))
+}

@@ -50,6 +50,8 @@ type Server struct {
 	static         http.Handler
 	sessionLimiter *fixedWindowRateLimiter
 	metaStore      *sessionMetaStore
+	wsPresence     *sessionPresenceTracker
+	pushDispatcher *pushDispatcher
 }
 
 type apiErrorBody struct {
@@ -88,13 +90,17 @@ func New(cfg Config, registry *adapter.Registry) *Server {
 		log.Printf("load session meta map failed: %v", err)
 		metaStore, _ = newSessionMetaStore("")
 	}
-	return &Server{
+	srv := &Server{
 		cfg:            cfg,
 		registry:       registry,
 		static:         http.FileServer(http.Dir(cfg.FrontendDir)),
 		sessionLimiter: newFixedWindowRateLimiter(time.Second),
 		metaStore:      metaStore,
+		wsPresence:     newSessionPresenceTracker(),
+		pushDispatcher: newPushDispatcher(cfg),
 	}
+	srv.attachAdapterEventObservers()
+	return srv
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -606,6 +612,10 @@ func (s *Server) handleWSRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsubscribe()
+	if s.wsPresence != nil {
+		s.wsPresence.Add(adapterName, sessionID)
+		defer s.wsPresence.Remove(adapterName, sessionID)
+	}
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()

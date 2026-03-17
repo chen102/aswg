@@ -79,6 +79,7 @@ type Adapter struct {
 	historyTailInterval  time.Duration
 	externalSessionIndex map[string]externalSessionInfo
 	externalIndexAt      time.Time
+	eventObserver        func(model.SessionEvent)
 }
 
 type idempotencyRecord struct {
@@ -236,6 +237,12 @@ func (a *Adapter) Name() string { return adapterName }
 func (a *Adapter) DisplayName() string { return adapterDisplay }
 
 func (a *Adapter) Version() string { return adapterVersion }
+
+func (a *Adapter) SetEventObserver(observer func(model.SessionEvent)) {
+	a.mu.Lock()
+	a.eventObserver = observer
+	a.mu.Unlock()
+}
 
 func (a *Adapter) Capabilities() []string {
 	return []string{"create_session", "delete_session", "discover_sessions", "events", "continue"}
@@ -2539,6 +2546,13 @@ func (a *Adapter) appendEvent(sessionID, eventType string, payload, normalized m
 
 	for _, sub := range readySubs {
 		sendEvent(sub.ch, ev)
+	}
+
+	a.mu.RLock()
+	observer := a.eventObserver
+	a.mu.RUnlock()
+	if observer != nil {
+		observer(ev)
 	}
 }
 

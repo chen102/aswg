@@ -25,6 +25,12 @@ CODEX_HISTORY_TAIL_INTERVAL_MS="${CODEX_HISTORY_TAIL_INTERVAL_MS:-2000}"
 SESSION_META_MAP_FILE="${SESSION_META_MAP_FILE:-.run/session-meta-map.json}"
 RATE_LIMIT_SESSIONS_PER_SEC="${RATE_LIMIT_SESSIONS_PER_SEC:-30}"
 FRONTEND_DIR="${FRONTEND_DIR:-../frontend/src}"
+PUSH_WEBHOOK_URL="${PUSH_WEBHOOK_URL:-}"
+PUSH_WEBHOOK_AUTH_BEARER="${PUSH_WEBHOOK_AUTH_BEARER:-}"
+PUSH_WEBHOOK_HMAC_SECRET="${PUSH_WEBHOOK_HMAC_SECRET:-}"
+PUSH_WEBHOOK_TIMEOUT_MS="${PUSH_WEBHOOK_TIMEOUT_MS:-3000}"
+PUSH_QUEUE_SIZE="${PUSH_QUEUE_SIZE:-512}"
+PUSH_DEDUPE_TTL_MS="${PUSH_DEDUPE_TTL_MS:-1800000}"
 CODEX_STREAM_MODE="real"
 CODEX_MOCK_FALLBACK="false"
 
@@ -54,6 +60,12 @@ Options for up/restart:
   --adapters <list>          ENABLED_ADAPTERS (default: codex)
   --default-adapter <name>   DEFAULT_ADAPTER (default: codex)
   --auth-token <token>       AUTH_TOKEN (default: empty)
+  --push-webhook-url <url>   PUSH_WEBHOOK_URL (default: empty = disabled)
+  --push-webhook-bearer <t>  PUSH_WEBHOOK_AUTH_BEARER (default: empty)
+  --push-webhook-hmac <sec>  PUSH_WEBHOOK_HMAC_SECRET (default: empty)
+  --push-timeout-ms <ms>     PUSH_WEBHOOK_TIMEOUT_MS (default: 3000)
+  --push-queue-size <n>      PUSH_QUEUE_SIZE (default: 512)
+  --push-dedupe-ttl-ms <ms>  PUSH_DEDUPE_TTL_MS (default: 1800000)
   --no-wait                  Do not wait for health check.
   -h, --help                 Show help.
 
@@ -118,6 +130,36 @@ parse_up_args() {
       --auth-token)
         [[ $# -ge 2 ]] || die "missing value for --auth-token"
         AUTH_TOKEN="$2"
+        shift 2
+        ;;
+      --push-webhook-url)
+        [[ $# -ge 2 ]] || die "missing value for --push-webhook-url"
+        PUSH_WEBHOOK_URL="$2"
+        shift 2
+        ;;
+      --push-webhook-bearer)
+        [[ $# -ge 2 ]] || die "missing value for --push-webhook-bearer"
+        PUSH_WEBHOOK_AUTH_BEARER="$2"
+        shift 2
+        ;;
+      --push-webhook-hmac)
+        [[ $# -ge 2 ]] || die "missing value for --push-webhook-hmac"
+        PUSH_WEBHOOK_HMAC_SECRET="$2"
+        shift 2
+        ;;
+      --push-timeout-ms)
+        [[ $# -ge 2 ]] || die "missing value for --push-timeout-ms"
+        PUSH_WEBHOOK_TIMEOUT_MS="$2"
+        shift 2
+        ;;
+      --push-queue-size)
+        [[ $# -ge 2 ]] || die "missing value for --push-queue-size"
+        PUSH_QUEUE_SIZE="$2"
+        shift 2
+        ;;
+      --push-dedupe-ttl-ms)
+        [[ $# -ge 2 ]] || die "missing value for --push-dedupe-ttl-ms"
+        PUSH_DEDUPE_TTL_MS="$2"
         shift 2
         ;;
       --no-wait)
@@ -224,6 +266,12 @@ start_server() {
     FRONTEND_DIR="${FRONTEND_DIR}" \
     SESSION_META_MAP_FILE="${SESSION_META_MAP_FILE}" \
     RATE_LIMIT_SESSIONS_PER_SEC="${RATE_LIMIT_SESSIONS_PER_SEC}" \
+    PUSH_WEBHOOK_URL="${PUSH_WEBHOOK_URL}" \
+    PUSH_WEBHOOK_AUTH_BEARER="${PUSH_WEBHOOK_AUTH_BEARER}" \
+    PUSH_WEBHOOK_HMAC_SECRET="${PUSH_WEBHOOK_HMAC_SECRET}" \
+    PUSH_WEBHOOK_TIMEOUT_MS="${PUSH_WEBHOOK_TIMEOUT_MS}" \
+    PUSH_QUEUE_SIZE="${PUSH_QUEUE_SIZE}" \
+    PUSH_DEDUPE_TTL_MS="${PUSH_DEDUPE_TTL_MS}" \
     CODEX_STREAM_MODE="${CODEX_STREAM_MODE}" \
     CODEX_CLI_BIN="${CODEX_CLI_BIN}" \
     CODEX_CLI_ARGS="${CODEX_CLI_ARGS}" \

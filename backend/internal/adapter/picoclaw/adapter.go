@@ -107,6 +107,7 @@ type Adapter struct {
 	historyEnabled  bool
 	historyDir      string
 	maxLiveWatchers int
+	eventObserver   func(model.SessionEvent)
 }
 
 var _ adapter.AgentAdapter = (*Adapter)(nil)
@@ -145,6 +146,12 @@ func (a *Adapter) Name() string { return adapterName }
 func (a *Adapter) DisplayName() string { return adapterDisplay }
 
 func (a *Adapter) Version() string { return adapterVersion }
+
+func (a *Adapter) SetEventObserver(observer func(model.SessionEvent)) {
+	a.mu.Lock()
+	a.eventObserver = observer
+	a.mu.Unlock()
+}
 
 func (a *Adapter) Capabilities() []string {
 	return []string{"create_session", "delete_session", "discover_sessions", "events", "continue"}
@@ -925,6 +932,13 @@ func (a *Adapter) appendEvent(sessionID, eventType string, payload, normalized m
 
 	for _, sub := range readySubs {
 		sendEvent(sub.ch, ev)
+	}
+
+	a.mu.RLock()
+	observer := a.eventObserver
+	a.mu.RUnlock()
+	if observer != nil {
+		observer(ev)
 	}
 }
 
