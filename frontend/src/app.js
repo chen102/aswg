@@ -2154,6 +2154,12 @@ function handleWSFrame(frame) {
   }
 
   const event = frame.data || {};
+  if (event?.session_id && state.selectedSessionID && event.session_id !== state.selectedSessionID) {
+    return;
+  }
+  if (event?.adapter && currentAdapter() && event.adapter !== currentAdapter()) {
+    return;
+  }
   const seq = Number(event.seq || 0);
   if (seq <= state.lastSeq) {
     return;

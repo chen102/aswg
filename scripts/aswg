@@ -209,7 +209,13 @@ start_server() {
 
   log "starting gateway..."
   cd "${ROOT_DIR}/backend"
-  env \
+  # Use nohup + setsid so gateway survives shell/session teardown and
+  # does not get tied to the caller's process group.
+  local launch_prefix=()
+  if command_exists setsid; then
+    launch_prefix=(setsid)
+  fi
+  nohup "${launch_prefix[@]}" env \
     SERVER_HOST="${SERVER_HOST}" \
     SERVER_PORT="${SERVER_PORT}" \
     AUTH_TOKEN="${AUTH_TOKEN}" \
@@ -228,7 +234,7 @@ start_server() {
     CODEX_HISTORY_SCAN_TTL_MS="${CODEX_HISTORY_SCAN_TTL_MS}" \
     CODEX_HISTORY_ACTIVE_WINDOW_MS="${CODEX_HISTORY_ACTIVE_WINDOW_MS}" \
     CODEX_HISTORY_TAIL_INTERVAL_MS="${CODEX_HISTORY_TAIL_INTERVAL_MS}" \
-    "${BIN_FILE}" >> "${LOG_FILE}" 2>&1 &
+    "${BIN_FILE}" >> "${LOG_FILE}" 2>&1 < /dev/null &
   local new_pid=$!
   cd "${ROOT_DIR}"
   echo "${new_pid}" > "${PID_FILE}"

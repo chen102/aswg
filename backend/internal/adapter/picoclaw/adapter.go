@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,9 +32,11 @@ const (
 	sessionStatusRun   = "running"
 	idempotencyTTL     = 5 * time.Minute
 	defaultWSBaseURL   = "ws://127.0.0.1:8080"
+	defaultHistoryDir  = "~/.picoclaw/workspace/sessions"
 	defaultDialTimeout = 5 * time.Second
 	defaultRunTimeout  = 120 * time.Second
 	defaultReadIdle    = 45 * time.Second
+	defaultMaxWatchers = 64
 )
 
 const (
@@ -53,6 +56,9 @@ type runtimeOptions struct {
 	dialTimeout     time.Duration
 	runTimeout      time.Duration
 	readIdleTimeout time.Duration
+	historyEnabled  bool
+	historyDir      string
+	maxLiveWatchers int
 }
 
 type picoMessage struct {
@@ -69,6 +75,7 @@ type sessionState struct {
 	nextSeq     int64
 	subscribers map[int]*subscriber
 	nextSubID   int
+	activeRuns  int
 }
 
 type subscriber struct {
@@ -87,6 +94,9 @@ type Adapter struct {
 	sessions        map[string]*sessionState
 	deletedSessions map[string]struct{}
 	idempotency     map[string]idempotencyRecord
+	liveWatchers    map[string]context.CancelFunc
+	watchCtx        context.Context
+	watchCancel     context.CancelFunc
 
 	wsBaseURL       string
 	token           string
@@ -94,6 +104,9 @@ type Adapter struct {
 	dialTimeout     time.Duration
 	runTimeout      time.Duration
 	readIdleTimeout time.Duration
+	historyEnabled  bool
+	historyDir      string
+	maxLiveWatchers int
 }
 
 var _ adapter.AgentAdapter = (*Adapter)(nil)
@@ -107,16 +120,23 @@ func NewAdapter() (*Adapter, error) {
 		return nil, fmt.Errorf("PICOCLAW_TOKEN is required")
 	}
 
+	watchCtx, watchCancel := context.WithCancel(context.Background())
 	return &Adapter{
 		sessions:        make(map[string]*sessionState),
 		deletedSessions: make(map[string]struct{}),
 		idempotency:     make(map[string]idempotencyRecord),
+		liveWatchers:    make(map[string]context.CancelFunc),
+		watchCtx:        watchCtx,
+		watchCancel:     watchCancel,
 		wsBaseURL:       opts.wsBaseURL,
 		token:           opts.token,
 		allowTokenQuery: opts.allowTokenQuery,
 		dialTimeout:     opts.dialTimeout,
 		runTimeout:      opts.runTimeout,
 		readIdleTimeout: opts.readIdleTimeout,
+		historyEnabled:  opts.historyEnabled,
+		historyDir:      opts.historyDir,
+		maxLiveWatchers: opts.maxLiveWatchers,
 	}, nil
 }
 
@@ -206,6 +226,7 @@ func (a *Adapter) DeleteSession(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return model.ErrSessionNotFound
 	}
+	a.stopLiveWatcher(sessionID)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -231,6 +252,8 @@ func (a *Adapter) DeleteSession(ctx context.Context, sessionID string) error {
 }
 
 func (a *Adapter) DiscoverSessions(ctx context.Context, req model.DiscoverRequest) (model.PagedSessions, error) {
+	a.syncHistorySessions()
+
 	if req.Limit <= 0 {
 		req.Limit = model.DefaultSessionsLimit
 	}
@@ -303,6 +326,7 @@ func (a *Adapter) DiscoverSessions(ctx context.Context, req model.DiscoverReques
 	if hasMore {
 		nextCursor = model.EncodeIndexCursor(end)
 	}
+	a.ensureLiveWatchersForSessions(page)
 
 	return model.PagedSessions{Items: page, HasMore: hasMore, NextCursor: nextCursor}, nil
 }
@@ -313,9 +337,12 @@ func (a *Adapter) GetSession(ctx context.Context, sessionID string) (model.Sessi
 		return model.SessionDetail{}, ctx.Err()
 	default:
 	}
+	a.syncHistorySessions()
+	sessionID = strings.TrimSpace(sessionID)
+	a.ensureLiveWatcher(sessionID)
 
 	a.mu.RLock()
-	state, ok := a.sessions[strings.TrimSpace(sessionID)]
+	state, ok := a.sessions[sessionID]
 	a.mu.RUnlock()
 	if !ok {
 		return model.SessionDetail{}, model.ErrSessionNotFound
@@ -324,6 +351,10 @@ func (a *Adapter) GetSession(ctx context.Context, sessionID string) (model.Sessi
 }
 
 func (a *Adapter) GetSessionEvents(ctx context.Context, req model.EventsRequest) (model.PagedEvents, error) {
+	a.syncHistorySessions()
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	a.ensureLiveWatcher(req.SessionID)
+
 	if req.Limit <= 0 {
 		req.Limit = model.DefaultEventsLimit
 	}
@@ -336,7 +367,7 @@ func (a *Adapter) GetSessionEvents(ctx context.Context, req model.EventsRequest)
 	}
 
 	a.mu.RLock()
-	state, ok := a.sessions[strings.TrimSpace(req.SessionID)]
+	state, ok := a.sessions[req.SessionID]
 	if !ok {
 		a.mu.RUnlock()
 		return model.PagedEvents{}, model.ErrSessionNotFound
@@ -368,6 +399,8 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 	if err := ctx.Err(); err != nil {
 		return model.RunJob{}, err
 	}
+	a.syncHistorySessions()
+
 	prompt := strings.TrimSpace(req.Prompt)
 	if len(prompt) == 0 || len(prompt) > 8000 {
 		return model.RunJob{}, fmt.Errorf("%w: prompt", model.ErrInvalidParam)
@@ -397,6 +430,7 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 
 	state.detail.Status = sessionStatusRun
 	state.detail.UpdatedAt = now
+	state.activeRuns++
 	job := model.RunJob{
 		JobID:     fmt.Sprintf("job_%d", now.UnixNano()),
 		Adapter:   adapterName,
@@ -411,9 +445,10 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 		}
 	}
 	a.mu.Unlock()
+	a.ensureLiveWatcher(sessionID)
 
 	go func() {
-		defer a.setSessionStatus(sessionID, sessionStatusIdle)
+		defer a.finishSessionRun(sessionID)
 		a.emitContinueEvents(ctx, sessionID, prompt)
 	}()
 
@@ -425,6 +460,9 @@ func (a *Adapter) Subscribe(ctx context.Context, sessionID string, fromSeq int64
 	if sessionID == "" {
 		return nil, nil, model.ErrSessionNotFound
 	}
+	// Bridge mode: when ASWG WS subscribes, ensure we have an upstream pico WS
+	// watcher so passive/out-of-band pico pushes can flow through to subscribers.
+	a.ensureLiveWatcher(sessionID)
 
 	a.mu.Lock()
 	state, ok := a.sessions[sessionID]
@@ -574,19 +612,49 @@ func (a *Adapter) streamPicoSession(ctx context.Context, sessionID, prompt strin
 
 	messageCache := make(map[string]string)
 	doneSent := false
+	assistantSeen := false
+	typingStopped := false
+	var typingStopDeadline time.Time
 
 	for {
 		if err := runCtx.Err(); err != nil {
 			return err
 		}
-		if a.readIdleTimeout > 0 {
-			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+		readWait := a.readIdleTimeout
+		if typingStopped {
+			remaining := time.Until(typingStopDeadline)
+			if remaining <= 0 {
+				if !doneSent {
+					a.appendAssistantDone(sessionID, "", map[string]any{
+						"raw_type": "typing.stop",
+						"source":   defaultSource,
+					})
+					doneSent = true
+				}
+				return nil
+			}
+			if readWait <= 0 || remaining < readWait {
+				readWait = remaining
+			}
+		}
+		if readWait > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(readWait))
 		}
 
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
+				if typingStopped {
+					if !doneSent {
+						a.appendAssistantDone(sessionID, "", map[string]any{
+							"raw_type": "typing.stop",
+							"source":   defaultSource,
+						})
+						doneSent = true
+					}
+					return nil
+				}
 				return fmt.Errorf("pico stream read timeout: %w", err)
 			}
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
@@ -603,6 +671,9 @@ func (a *Adapter) streamPicoSession(ctx context.Context, sessionID, prompt strin
 
 		var msg picoMessage
 		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		if !messageBelongsToSession(msg, sessionID) {
 			continue
 		}
 
@@ -634,15 +705,26 @@ func (a *Adapter) streamPicoSession(ctx context.Context, sessionID, prompt strin
 				"source":     defaultSource,
 				"message_id": msgID,
 			})
+			assistantSeen = true
+			if typingStopped && !doneSent {
+				a.appendAssistantDone(sessionID, "", map[string]any{
+					"raw_type": "typing.stop",
+					"source":   defaultSource,
+				})
+				doneSent = true
+				return nil
+			}
 		case picoTypeTypingStop:
-			if !doneSent {
+			typingStopped = true
+			typingStopDeadline = time.Now().Add(2 * time.Second)
+			if assistantSeen && !doneSent {
 				a.appendAssistantDone(sessionID, "", map[string]any{
 					"raw_type": picoTypeTypingStop,
 					"source":   defaultSource,
 				})
 				doneSent = true
+				return nil
 			}
-			return nil
 		case picoTypeError:
 			return fmt.Errorf("pico error: %s", extractPicoError(msg.Payload))
 		case picoTypePong:
@@ -846,6 +928,248 @@ func (a *Adapter) appendEvent(sessionID, eventType string, payload, normalized m
 	}
 }
 
+func (a *Adapter) ensureLiveWatcher(sessionID string) {
+	a.ensureLiveWatcherInternal(sessionID, true)
+}
+
+func (a *Adapter) ensureLiveWatcherBestEffort(sessionID string) {
+	a.ensureLiveWatcherInternal(sessionID, false)
+}
+
+func (a *Adapter) ensureLiveWatcherInternal(sessionID string, force bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+
+	a.mu.Lock()
+	if !force && a.maxLiveWatchers > 0 && len(a.liveWatchers) >= a.maxLiveWatchers {
+		if _, exists := a.liveWatchers[sessionID]; !exists {
+			a.mu.Unlock()
+			return
+		}
+	}
+	if _, ok := a.sessions[sessionID]; !ok {
+		a.mu.Unlock()
+		return
+	}
+	if _, exists := a.liveWatchers[sessionID]; exists {
+		a.mu.Unlock()
+		return
+	}
+	parent := a.watchCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	watchCtx, cancel := context.WithCancel(parent)
+	a.liveWatchers[sessionID] = cancel
+	a.mu.Unlock()
+
+	go a.liveWatchLoop(watchCtx, sessionID)
+}
+
+func (a *Adapter) ensureLiveWatchersForSessions(items []model.SessionSummary) {
+	if len(items) == 0 {
+		return
+	}
+	for _, item := range items {
+		a.ensureLiveWatcherBestEffort(item.ID)
+	}
+}
+
+func (a *Adapter) stopLiveWatcher(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if fn, ok := a.liveWatchers[sessionID]; ok {
+		cancel = fn
+		delete(a.liveWatchers, sessionID)
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *Adapter) liveWatchLoop(ctx context.Context, sessionID string) {
+	backoff := time.Second
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+
+		conn, err := a.dialSessionWS(ctx, sessionID)
+		if err != nil {
+			if !sleepWithContext(ctx, backoff) {
+				return
+			}
+			if backoff < 15*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
+
+		a.liveWatchReadLoop(ctx, sessionID, conn)
+		_ = conn.Close()
+	}
+}
+
+func (a *Adapter) liveWatchReadLoop(ctx context.Context, sessionID string, conn *websocket.Conn) {
+	conn.SetReadLimit(8 << 20)
+	if a.readIdleTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+		conn.SetPongHandler(func(appData string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+			return nil
+		})
+		conn.SetPingHandler(func(appData string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+			deadline := time.Now().Add(5 * time.Second)
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), deadline)
+		})
+	}
+
+	typing := false
+	messageCache := make(map[string]string)
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if a.readIdleTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+		}
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				return
+			}
+			return
+		}
+
+		var msg picoMessage
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		if !messageBelongsToSession(msg, sessionID) {
+			continue
+		}
+		a.handleLiveMessage(sessionID, &typing, messageCache, msg)
+	}
+}
+
+func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache map[string]string, msg picoMessage) {
+	if a.sessionHasActiveRun(sessionID) {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(msg.Type)) {
+	case picoTypeTypingStart:
+		a.appendAssistantAction(sessionID, "正在生成回复", map[string]any{
+			"raw_type": msg.Type,
+			"source":   defaultSource,
+			"origin":   "live_watch",
+		})
+		*typing = true
+	case picoTypeMessageCreate, picoTypeMessageUpdate:
+		text := extractPicoText(msg.Payload)
+		if text == "" {
+			return
+		}
+		msgID := extractPicoMessageID(msg)
+		if *typing {
+			delta := text
+			if msgID != "" {
+				prev := messageCache[msgID]
+				if prev != "" && strings.HasPrefix(text, prev) {
+					delta = strings.TrimPrefix(text, prev)
+				}
+				messageCache[msgID] = text
+			}
+			if delta == "" {
+				return
+			}
+			a.appendAssistantDelta(sessionID, delta, map[string]any{
+				"raw_type":   msg.Type,
+				"source":     defaultSource,
+				"message_id": msgID,
+				"origin":     "live_watch",
+			})
+			return
+		}
+		if msgID != "" {
+			if prev, ok := messageCache[msgID]; ok && prev == text {
+				return
+			}
+			messageCache[msgID] = text
+		}
+		a.appendAssistantDone(sessionID, text, map[string]any{
+			"raw_type":   msg.Type,
+			"source":     defaultSource,
+			"message_id": msgID,
+			"origin":     "live_watch",
+		})
+	case picoTypeTypingStop:
+		if *typing {
+			a.appendAssistantDone(sessionID, "", map[string]any{
+				"raw_type": msg.Type,
+				"source":   defaultSource,
+				"origin":   "live_watch",
+			})
+		}
+		*typing = false
+	case picoTypePong:
+		return
+	default:
+		return
+	}
+}
+
+func (a *Adapter) sessionHasActiveRun(sessionID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	return state.activeRuns > 0
+}
+
+func (a *Adapter) finishSessionRun(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		return
+	}
+	if state.activeRuns > 0 {
+		state.activeRuns--
+	}
+	if state.activeRuns == 0 {
+		state.detail.Status = sessionStatusIdle
+		state.detail.UpdatedAt = time.Now().UTC()
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (a *Adapter) setSessionStatus(sessionID, status string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -922,6 +1246,57 @@ func extractPicoMessageID(msg picoMessage) string {
 	return strings.TrimSpace(msg.ID)
 }
 
+func messageBelongsToSession(msg picoMessage, sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return true
+	}
+	candidate := strings.TrimSpace(msg.SessionID)
+	if candidate == "" {
+		candidate = extractSessionIDFromPayload(msg.Payload)
+	}
+	if candidate == "" {
+		// Keep backward compatibility with upstream payloads that don't
+		// carry explicit session identifiers.
+		return true
+	}
+	return candidate == sessionID
+}
+
+func extractSessionIDFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if v, ok := payload["session_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := payload["sessionId"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := payload["chat_id"].(string); ok {
+		return parseSessionIDFromChatID(v)
+	}
+	if v, ok := payload["chatId"].(string); ok {
+		return parseSessionIDFromChatID(v)
+	}
+	return ""
+}
+
+func parseSessionIDFromChatID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, ":")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := strings.TrimSpace(parts[i])
+		if strings.HasPrefix(part, "pico_sess_") || strings.HasPrefix(part, "hc_") {
+			return part
+		}
+	}
+	return ""
+}
+
 func extractPicoError(payload map[string]any) string {
 	if payload == nil {
 		return "unknown error"
@@ -966,12 +1341,353 @@ func sendEventWithContext(ctx context.Context, ch chan model.SessionEvent, ev mo
 	}
 }
 
+type historySessionFile struct {
+	Key      string `json:"key"`
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Created string `json:"created"`
+	Updated string `json:"updated"`
+}
+
+type historySnapshot struct {
+	id        string
+	title     string
+	createdAt time.Time
+	updatedAt time.Time
+	events    []model.SessionEvent
+	filePath  string
+}
+
+func (a *Adapter) syncHistorySessions() {
+	if !a.historyEnabled {
+		return
+	}
+	historyDir := strings.TrimSpace(a.historyDir)
+	if historyDir == "" {
+		return
+	}
+
+	entries, err := os.ReadDir(historyDir)
+	if err != nil {
+		return
+	}
+
+	snapshots := make(map[string]historySnapshot, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || !strings.HasSuffix(strings.ToLower(name), ".json") {
+			continue
+		}
+		path := filepath.Join(historyDir, name)
+		snap, ok := parseHistorySnapshot(path)
+		if !ok {
+			continue
+		}
+		if prev, exists := snapshots[snap.id]; exists && !snap.updatedAt.After(prev.updatedAt) {
+			continue
+		}
+		snapshots[snap.id] = snap
+	}
+	if len(snapshots) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for sessionID, snap := range snapshots {
+		if _, deleted := a.deletedSessions[sessionID]; deleted {
+			continue
+		}
+		if state, ok := a.sessions[sessionID]; ok {
+			imported := isHistoryImported(state.detail.Metadata)
+			if imported && normalizeSessionStatus(state.detail.Status) != sessionStatusRun {
+				if snap.updatedAt.After(state.detail.UpdatedAt) || len(snap.events) > len(state.events) {
+					state.events = cloneSessionEvents(snap.events)
+					state.nextSeq = int64(len(state.events) + 1)
+					state.detail.Status = sessionStatusIdle
+					state.detail.UpdatedAt = snap.updatedAt
+					if !snap.createdAt.IsZero() {
+						state.detail.CreatedAt = snap.createdAt
+					}
+					if strings.TrimSpace(snap.title) != "" {
+						state.detail.Title = snap.title
+					}
+					if state.detail.Metadata == nil {
+						state.detail.Metadata = map[string]any{}
+					}
+					state.detail.Metadata["history_file"] = snap.filePath
+					state.detail.Metadata["history_imported"] = true
+				}
+			}
+			if strings.TrimSpace(state.detail.Title) == "" {
+				state.detail.Title = snap.title
+			}
+			if state.detail.UpdatedAt.Before(snap.updatedAt) {
+				state.detail.UpdatedAt = snap.updatedAt
+			}
+			continue
+		}
+
+		createdAt := snap.createdAt
+		if createdAt.IsZero() {
+			createdAt = snap.updatedAt
+		}
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
+		updatedAt := snap.updatedAt
+		if updatedAt.IsZero() {
+			updatedAt = createdAt
+		}
+		title := strings.TrimSpace(snap.title)
+		if title == "" {
+			title = sessionID
+		}
+
+		a.sessions[sessionID] = &sessionState{
+			detail: model.SessionDetail{
+				Adapter:   adapterName,
+				ID:        sessionID,
+				Title:     title,
+				Status:    sessionStatusIdle,
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+				Workspace: defaultWorkspace,
+				Source:    defaultSource,
+				Metadata: map[string]any{
+					"channel":          "pico",
+					"ws_base_url":      a.wsBaseURL,
+					"history_file":     snap.filePath,
+					"history_imported": true,
+				},
+			},
+			events:      cloneSessionEvents(snap.events),
+			nextSeq:     int64(len(snap.events) + 1),
+			subscribers: make(map[int]*subscriber),
+		}
+	}
+}
+
+func parseHistorySnapshot(path string) (historySnapshot, bool) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return historySnapshot{}, false
+	}
+
+	var src historySessionFile
+	if err := json.Unmarshal(content, &src); err != nil {
+		return historySnapshot{}, false
+	}
+
+	sessionID := extractSessionIDFromHistoryKey(src.Key)
+	if sessionID == "" {
+		return historySnapshot{}, false
+	}
+
+	createdAt := parseSessionTime(src.Created)
+	updatedAt := parseSessionTime(src.Updated)
+	if updatedAt.IsZero() {
+		if info, statErr := os.Stat(path); statErr == nil {
+			updatedAt = info.ModTime().UTC()
+		}
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	if createdAt.IsZero() {
+		createdAt = updatedAt
+	}
+
+	events := buildHistoryEvents(sessionID, src.Messages, createdAt, updatedAt)
+	title := deriveHistoryTitle(src.Messages, sessionID)
+
+	return historySnapshot{
+		id:        sessionID,
+		title:     title,
+		createdAt: createdAt,
+		updatedAt: updatedAt,
+		events:    events,
+		filePath:  path,
+	}, true
+}
+
+func extractSessionIDFromHistoryKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	const marker = ":pico:direct:pico:"
+	idx := strings.LastIndex(key, marker)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(key[idx+len(marker):])
+}
+
+func parseSessionTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+func deriveHistoryTitle(messages []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}, fallback string) string {
+	for _, msg := range messages {
+		if !strings.EqualFold(strings.TrimSpace(msg.Role), "user") {
+			continue
+		}
+		text := strings.Join(strings.Fields(msg.Content), " ")
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		runes := []rune(text)
+		if len(runes) > 120 {
+			return string(runes[:117]) + "..."
+		}
+		return text
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func buildHistoryEvents(sessionID string, messages []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}, createdAt, updatedAt time.Time) []model.SessionEvent {
+	type historyMessage struct {
+		role string
+		text string
+	}
+	filtered := make([]historyMessage, 0, len(messages))
+	for _, msg := range messages {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := strings.TrimSpace(msg.Content)
+		if text == "" {
+			continue
+		}
+		filtered = append(filtered, historyMessage{role: role, text: text})
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	base := createdAt
+	if base.IsZero() {
+		base = updatedAt
+	}
+	if base.IsZero() {
+		base = time.Now().UTC()
+	}
+	step := 50 * time.Millisecond
+	if updatedAt.After(base) {
+		if candidate := updatedAt.Sub(base) / time.Duration(len(filtered)); candidate > 0 {
+			step = candidate
+		}
+	}
+
+	events := make([]model.SessionEvent, 0, len(filtered))
+	seq := int64(1)
+	for i, msg := range filtered {
+		ts := base.Add(step * time.Duration(i))
+		if i == len(filtered)-1 && updatedAt.After(ts) {
+			ts = updatedAt
+		}
+		switch msg.role {
+		case "user":
+			events = append(events, model.SessionEvent{
+				Adapter:   adapterName,
+				SessionID: sessionID,
+				Seq:       seq,
+				Ts:        ts,
+				Type:      "message.user",
+				Payload: map[string]any{
+					"raw_type": "history_message",
+					"source":   defaultSource,
+					"text":     msg.text,
+				},
+				Normalized: map[string]any{
+					"role": "user",
+					"text": msg.text,
+					"done": true,
+				},
+			})
+		case "assistant":
+			events = append(events, model.SessionEvent{
+				Adapter:   adapterName,
+				SessionID: sessionID,
+				Seq:       seq,
+				Ts:        ts,
+				Type:      "message.done",
+				Payload: map[string]any{
+					"raw_type": "history_message",
+					"source":   defaultSource,
+					"text":     msg.text,
+				},
+				Normalized: map[string]any{
+					"role": "assistant",
+					"text": msg.text,
+					"done": true,
+				},
+			})
+		}
+		seq++
+	}
+	return events
+}
+
+func isHistoryImported(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	value, ok := meta["history_imported"]
+	if !ok {
+		return false
+	}
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		v = strings.TrimSpace(strings.ToLower(v))
+		return v == "1" || v == "true" || v == "yes"
+	default:
+		return false
+	}
+}
+
+func cloneSessionEvents(items []model.SessionEvent) []model.SessionEvent {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]model.SessionEvent, len(items))
+	copy(out, items)
+	return out
+}
+
 func loadRuntimeOptions() (runtimeOptions, error) {
 	opts := runtimeOptions{
 		dialTimeout:     defaultDialTimeout,
 		runTimeout:      defaultRunTimeout,
 		readIdleTimeout: defaultReadIdle,
 		allowTokenQuery: parseBoolEnv("PICOCLAW_ALLOW_TOKEN_QUERY", false),
+		historyEnabled:  parseBoolEnv("PICOCLAW_HISTORY_ENABLED", true),
+		maxLiveWatchers: defaultMaxWatchers,
 	}
 
 	rawBase := strings.TrimSpace(os.Getenv("PICOCLAW_WS_BASE_URL"))
@@ -994,8 +1710,31 @@ func loadRuntimeOptions() (runtimeOptions, error) {
 	if ms := parsePositiveMS("PICOCLAW_READ_IDLE_TIMEOUT_MS"); ms > 0 {
 		opts.readIdleTimeout = ms
 	}
+	rawHistoryDir := strings.TrimSpace(os.Getenv("PICOCLAW_HISTORY_DIR"))
+	if rawHistoryDir == "" {
+		rawHistoryDir = defaultHistoryDir
+	}
+	opts.historyDir = expandHomePath(rawHistoryDir)
+	if n := parsePositiveInt("PICOCLAW_MAX_LIVE_WATCHERS"); n > 0 {
+		opts.maxLiveWatchers = n
+	}
 
 	return opts, nil
+}
+
+func expandHomePath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.HasPrefix(raw, "~") {
+		return raw
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return raw
+	}
+	if raw == "~" {
+		return home
+	}
+	return filepath.Join(home, strings.TrimPrefix(raw, "~/"))
 }
 
 func normalizeWSBaseURL(raw string) (string, error) {
@@ -1042,6 +1781,18 @@ func parsePositiveMS(key string) time.Duration {
 		return 0
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+func parsePositiveInt(key string) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
 }
 
 func parseBoolEnv(key string, fallback bool) bool {

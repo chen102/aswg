@@ -443,6 +443,80 @@ func TestDiscoverSessionsKeepsFresherLocalStatusWhenHistoryIsStale(t *testing.T)
 	}
 }
 
+func TestDiscoverSessionsKeepsRunningWhenLocalContinueInFlight(t *testing.T) {
+	t.Setenv("CODEX_STREAM_MODE", "mock")
+	a, err := NewAdapter("")
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	local, err := a.CreateSession(context.Background(), model.CreateSessionInput{
+		Title:     "Local Inflight Session",
+		Workspace: "/workspace/local",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	threadID := "01900000-0000-7000-a100-0000000000be"
+	localUpdatedAt := time.Now().UTC()
+	historyUpdatedAt := localUpdatedAt.Add(2 * time.Minute)
+	a.setSessionThreadID(local.ID, threadID)
+
+	a.mu.Lock()
+	if state, ok := a.sessions[local.ID]; ok {
+		state.detail.Status = sessionStatusRunning
+		state.detail.UpdatedAt = localUpdatedAt
+		state.activeRuns = 1
+	}
+	a.historyEnabled = true
+	a.historyDir = t.TempDir()
+	a.historyTTL = 10 * time.Minute
+	a.externalIndexAt = time.Now().UTC()
+	a.externalSessionIndex = map[string]externalSessionInfo{
+		threadID: {
+			detail: model.SessionDetail{
+				Adapter:   adapterName,
+				ID:        threadID,
+				Title:     "History Session",
+				Status:    sessionStatusIdle,
+				CreatedAt: localUpdatedAt.Add(-10 * time.Minute),
+				UpdatedAt: historyUpdatedAt,
+				Workspace: "/workspace/history",
+				Source:    defaultHistorySource,
+				Metadata: map[string]any{
+					"origin":          "codex_history",
+					"codex_thread_id": threadID,
+				},
+			},
+			path: filepath.Join(a.historyDir, threadID+".jsonl"),
+		},
+	}
+	a.mu.Unlock()
+
+	page, err := a.DiscoverSessions(context.Background(), model.DiscoverRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("DiscoverSessions() error = %v", err)
+	}
+
+	foundLocal := false
+	for _, item := range page.Items {
+		if item.ID != local.ID {
+			continue
+		}
+		foundLocal = true
+		if item.Status != sessionStatusRunning {
+			t.Fatalf("expected local inflight session status=%q, got %q", sessionStatusRunning, item.Status)
+		}
+		if !item.UpdatedAt.Equal(historyUpdatedAt) {
+			t.Fatalf("expected merged updated_at=%s, got %s", historyUpdatedAt, item.UpdatedAt)
+		}
+	}
+	if !foundLocal {
+		t.Fatalf("expected local session %s in discover result", local.ID)
+	}
+}
+
 func TestReadHistorySessionSummaryMismatchedTerminalClearsRunning(t *testing.T) {
 	t.Parallel()
 
@@ -493,15 +567,20 @@ func TestReadHistorySessionSummaryKeepsRunningOnRecentHeartbeat(t *testing.T) {
 	}
 }
 
-func TestReadHistorySessionSummaryAgentMessageClearsRunning(t *testing.T) {
+func TestReadHistorySessionSummaryAgentMessageDoesNotClearRunning(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	path := filepath.Join(root, "rollout-2026-03-13T10-00-00-01900000-0000-7000-a100-0000000000ee.jsonl")
+	now := time.Now().UTC()
+	startedAt := now.Add(-2 * time.Minute)
+	agentAt := now.Add(-1 * time.Minute)
+	tokenAt := now.Add(-30 * time.Second)
 	content := strings.Join([]string{
-		`{"timestamp":"2026-03-13T10:00:00.000Z","type":"session_meta","payload":{"id":"01900000-0000-7000-a100-0000000000ee","timestamp":"2026-03-13T10:00:00.000Z","cwd":"/workspace/aswg","source":"cli"}}`,
-		`{"timestamp":"2026-03-13T10:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn_a"}}`,
-		`{"timestamp":"2026-03-13T10:00:05.000Z","type":"event_msg","payload":{"type":"agent_message"}}`,
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":"01900000-0000-7000-a100-0000000000ee","timestamp":%q,"cwd":"/workspace/aswg","source":"cli"}}`, startedAt.Format(time.RFC3339Nano), startedAt.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn_a"}}`, startedAt.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"agent_message"}}`, agentAt.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","total":456}}`, tokenAt.Format(time.RFC3339Nano)),
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -511,8 +590,8 @@ func TestReadHistorySessionSummaryAgentMessageClearsRunning(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected summary parse success")
 	}
-	if info.detail.Status != sessionStatusIdle {
-		t.Fatalf("expected status=%q after agent_message, got %q", sessionStatusIdle, info.detail.Status)
+	if info.detail.Status != sessionStatusRunning {
+		t.Fatalf("expected status=%q with active turn heartbeat, got %q", sessionStatusRunning, info.detail.Status)
 	}
 }
 

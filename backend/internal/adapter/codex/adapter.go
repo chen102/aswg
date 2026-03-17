@@ -49,6 +49,7 @@ type sessionState struct {
 	subscribers         map[int]*subscriber
 	nextSubID           int
 	codexThread         string
+	activeRuns          int
 	historyPath         string
 	historyOffset       int64
 	historyFollowActive bool
@@ -461,7 +462,7 @@ func (a *Adapter) DiscoverSessions(ctx context.Context, req model.DiscoverReques
 			if !exists || state == nil {
 				continue
 			}
-			applyHistoryDetail(&state.detail, info)
+			applyHistoryDetail(&state.detail, info, state.activeRuns > 0)
 			historyAliasToLocal[historyID] = targetID
 		}
 		a.mu.Unlock()
@@ -554,7 +555,7 @@ func (a *Adapter) GetSession(ctx context.Context, sessionID string) (model.Sessi
 		if info, ok := history[sessionID]; ok {
 			a.mu.Lock()
 			if s, exists := a.sessions[sessionID]; exists && isHistoryBackedSession(s.detail) {
-				applyHistoryDetail(&s.detail, info)
+				applyHistoryDetail(&s.detail, info, s.activeRuns > 0)
 			}
 			a.mu.Unlock()
 		}
@@ -645,6 +646,7 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 		}
 	}
 	if sess, exists := a.sessions[req.SessionID]; exists {
+		sess.activeRuns++
 		sess.detail.Status = sessionStatusRunning
 		sess.detail.UpdatedAt = now
 		if isHistoryBackedSession(sess.detail) {
@@ -671,7 +673,7 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 	a.mu.Unlock()
 
 	go func() {
-		defer a.setSessionStatus(req.SessionID, sessionStatusIdle)
+		defer a.finishSessionRun(req.SessionID)
 		defer a.resumeHistoryFollow(req.SessionID)
 		a.emitContinueEvents(ctx, req.SessionID, prompt)
 	}()
@@ -1136,6 +1138,8 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 	activeTurnID := ""
 	activeTurnAt := time.Time{}
 	sawTaskEvents := false
+	lastTaskStartAt := time.Time{}
+	lastTaskEndAt := time.Time{}
 
 	scanner := newJSONLScanner(f)
 	for scanner.Scan() {
@@ -1214,8 +1218,6 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 				strings.HasSuffix(eventType, ".started")
 			isTaskEnd := eventType == "task_complete" ||
 				eventType == "task_completed" ||
-				eventType == "agent_message" ||
-				eventType == "assistant_message" ||
 				eventType == "turn_aborted" ||
 				eventType == "task_aborted" ||
 				eventType == "task_failed" ||
@@ -1240,7 +1242,13 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 			if isTaskStart {
 				activeTurnID = turnID
 				activeTurnAt = ts
+				if !ts.IsZero() && (lastTaskStartAt.IsZero() || ts.After(lastTaskStartAt)) {
+					lastTaskStartAt = ts
+				}
 				continue
+			}
+			if !ts.IsZero() && (lastTaskEndAt.IsZero() || ts.After(lastTaskEndAt)) {
+				lastTaskEndAt = ts
 			}
 			// A terminal event without turn_id (or with a mismatched one) still
 			// means the active turn likely finished, so clear running state.
@@ -1291,6 +1299,15 @@ func readHistorySessionSummary(path string, activeWindow time.Duration) (externa
 	status := sessionStatusIdle
 	if hasRecentActiveTurn {
 		status = sessionStatusRunning
+	} else if !lastTaskStartAt.IsZero() && (lastTaskEndAt.IsZero() || lastTaskStartAt.After(lastTaskEndAt)) {
+		if activeWindow <= 0 {
+			status = sessionStatusRunning
+		} else if !updatedAt.IsZero() && time.Since(updatedAt) <= activeWindow {
+			// A task start newer than the latest terminal event plus recent log
+			// activity indicates an active external run, even if terminal events
+			// are delayed or temporarily missing.
+			status = sessionStatusRunning
+		}
 	} else if !sawTaskEvents && activeWindow > 0 && !updatedAt.IsZero() {
 		if time.Since(updatedAt) <= activeWindow {
 			status = sessionStatusRunning
@@ -2533,7 +2550,30 @@ func (a *Adapter) setSessionStatus(sessionID, status string) {
 	if !ok {
 		return
 	}
-	s.detail.Status = normalizeSessionStatus(status)
+	next := normalizeSessionStatus(status)
+	if next == sessionStatusIdle && s.activeRuns > 0 {
+		next = sessionStatusRunning
+	}
+	s.detail.Status = next
+	s.detail.UpdatedAt = time.Now().UTC()
+}
+
+func (a *Adapter) finishSessionRun(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	s, ok := a.sessions[sessionID]
+	if !ok {
+		return
+	}
+	if s.activeRuns > 0 {
+		s.activeRuns--
+	}
+	if s.activeRuns > 0 {
+		s.detail.Status = sessionStatusRunning
+	} else {
+		s.detail.Status = sessionStatusIdle
+	}
 	s.detail.UpdatedAt = time.Now().UTC()
 }
 
@@ -2745,11 +2785,15 @@ func isHistoryBackedSession(detail model.SessionDetail) bool {
 	return false
 }
 
-func applyHistoryDetail(detail *model.SessionDetail, info externalSessionInfo) {
+func applyHistoryDetail(detail *model.SessionDetail, info externalSessionInfo, keepRunning bool) {
 	// Never let stale history status overwrite fresher in-memory status.
 	historyIsFresher := !info.detail.UpdatedAt.Before(detail.UpdatedAt)
 	if historyIsFresher {
-		detail.Status = normalizeSessionStatus(info.detail.Status)
+		incoming := normalizeSessionStatus(info.detail.Status)
+		current := normalizeSessionStatus(detail.Status)
+		if !(keepRunning && current == sessionStatusRunning && incoming == sessionStatusIdle) {
+			detail.Status = incoming
+		}
 	}
 	if info.detail.UpdatedAt.After(detail.UpdatedAt) {
 		detail.UpdatedAt = info.detail.UpdatedAt

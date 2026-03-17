@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,4 +227,210 @@ func waitForDoneEvents(t *testing.T, a *Adapter, sessionID string, timeout time.
 	}
 	t.Fatalf("timeout waiting for message.done")
 	return nil
+}
+
+func TestDiscoverSessionsImportsHistory(t *testing.T) {
+	t.Setenv("PICOCLAW_TOKEN", "test-token")
+	t.Setenv("PICOCLAW_WS_BASE_URL", "ws://127.0.0.1:65535")
+	t.Setenv("PICOCLAW_HISTORY_ENABLED", "true")
+
+	historyDir := t.TempDir()
+	t.Setenv("PICOCLAW_HISTORY_DIR", historyDir)
+
+	historyFile := filepath.Join(historyDir, "agent_main_pico_direct_pico_hist_test_001.json")
+	payload := `{
+  "key": "agent:main:pico:direct:pico:hist_test_001",
+  "messages": [
+    {"role":"user","content":"历史会话测试问题"},
+    {"role":"assistant","content":"历史会话测试回答"}
+  ],
+  "created": "2026-03-16T09:00:00.000Z",
+  "updated": "2026-03-16T09:00:03.000Z"
+}`
+	if err := os.WriteFile(historyFile, []byte(payload), 0o644); err != nil {
+		t.Fatalf("write history file error = %v", err)
+	}
+
+	a, err := NewAdapter()
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	page, err := a.DiscoverSessions(context.Background(), model.DiscoverRequest{Limit: 20})
+	if err != nil {
+		t.Fatalf("DiscoverSessions() error = %v", err)
+	}
+	found := false
+	for _, item := range page.Items {
+		if item.ID == "hist_test_001" {
+			found = true
+			if item.Title != "历史会话测试问题" {
+				t.Fatalf("unexpected imported title: %q", item.Title)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected imported history session in discover list")
+	}
+
+	events, err := a.GetSessionEvents(context.Background(), model.EventsRequest{
+		SessionID: "hist_test_001",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("GetSessionEvents() error = %v", err)
+	}
+	if len(events.Items) != 2 {
+		t.Fatalf("expected 2 imported events, got %d", len(events.Items))
+	}
+	if events.Items[0].Type != "message.user" {
+		t.Fatalf("event[0] expected message.user, got %s", events.Items[0].Type)
+	}
+	if text, _ := events.Items[0].Normalized["text"].(string); text != "历史会话测试问题" {
+		t.Fatalf("event[0] expected text=%q, got %q", "历史会话测试问题", text)
+	}
+	if events.Items[1].Type != "message.done" {
+		t.Fatalf("event[1] expected message.done, got %s", events.Items[1].Type)
+	}
+	if text, _ := events.Items[1].Normalized["text"].(string); text != "历史会话测试回答" {
+		t.Fatalf("event[1] expected text=%q, got %q", "历史会话测试回答", text)
+	}
+}
+
+func TestSubscribeBridgesLivePicoMessage(t *testing.T) {
+	const token = "pico-token"
+	const pushedText = "后台推送：你好"
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pico/ws" {
+			http.NotFound(w, r)
+			return
+		}
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if auth != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+		if sessionID == "" {
+			return
+		}
+
+		_ = conn.WriteJSON(picoMessage{
+			Type:      picoTypeMessageCreate,
+			SessionID: sessionID,
+			Timestamp: time.Now().UnixMilli(),
+			Payload: map[string]any{
+				"message_id": "live-msg-1",
+				"content":    pushedText,
+			},
+		})
+		time.Sleep(120 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	t.Setenv("PICOCLAW_TOKEN", token)
+	t.Setenv("PICOCLAW_WS_BASE_URL", server.URL)
+	t.Setenv("PICOCLAW_HISTORY_ENABLED", "false")
+
+	a, err := NewAdapter()
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+	detail, err := a.CreateSession(context.Background(), model.CreateSessionInput{Title: "live-bridge"})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	ch, unsubscribe, err := a.Subscribe(context.Background(), detail.ID, 0)
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	defer unsubscribe()
+
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type != "message.done" {
+				continue
+			}
+			text, _ := ev.Normalized["text"].(string)
+			if text != pushedText {
+				continue
+			}
+			return
+		case <-timeout:
+			t.Fatalf("timeout waiting live bridged event")
+		}
+	}
+}
+
+func TestMessageBelongsToSession(t *testing.T) {
+	sessionID := "pico_sess_target_001"
+	tests := []struct {
+		name string
+		msg  picoMessage
+		want bool
+	}{
+		{
+			name: "match by top-level session id",
+			msg: picoMessage{
+				SessionID: sessionID,
+			},
+			want: true,
+		},
+		{
+			name: "mismatch by top-level session id",
+			msg: picoMessage{
+				SessionID: "pico_sess_other",
+			},
+			want: false,
+		},
+		{
+			name: "match by payload session_id",
+			msg: picoMessage{
+				Payload: map[string]any{"session_id": sessionID},
+			},
+			want: true,
+		},
+		{
+			name: "match by payload chat_id",
+			msg: picoMessage{
+				Payload: map[string]any{"chat_id": "pico:pico:" + sessionID},
+			},
+			want: true,
+		},
+		{
+			name: "mismatch by payload chat_id",
+			msg: picoMessage{
+				Payload: map[string]any{"chat_id": "pico:pico:pico_sess_other"},
+			},
+			want: false,
+		},
+		{
+			name: "no session info keeps compatibility",
+			msg: picoMessage{
+				Payload: map[string]any{"content": "hello"},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := messageBelongsToSession(tc.msg, sessionID)
+			if got != tc.want {
+				t.Fatalf("messageBelongsToSession()=%v, want %v", got, tc.want)
+			}
+		})
+	}
 }
