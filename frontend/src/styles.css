@@ -382,7 +382,16 @@ textarea {
   gap: 8px;
 }
 
+.sidebar-header {
+  grid-row: 1;
+}
+
+.session-filter-box {
+  grid-row: 2;
+}
+
 .create-session-form {
+  grid-row: 3;
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -401,13 +410,29 @@ textarea {
 }
 
 .session-list {
+  grid-row: 4;
   min-height: 0;
+  height: 100%;
   overflow: auto;
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
+  align-content: start;
+  grid-auto-rows: max-content;
   gap: 8px;
+}
+
+body.viewport-desktop.adapter-picoclaw .sidebar {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+body.viewport-desktop.adapter-picoclaw .create-session-form {
+  display: none;
+}
+
+body.viewport-desktop.adapter-picoclaw .session-list {
+  grid-row: 3;
 }
 
 .session-list li {
@@ -416,6 +441,7 @@ textarea {
 
 .session-list button {
   width: 100%;
+  min-width: 0;
   text-align: left;
   border: 1px solid var(--subpage-border);
   border-radius: 12px;
@@ -426,6 +452,10 @@ textarea {
   gap: 6px;
   box-shadow: var(--subpage-highlight);
   transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.session-list button > * {
+  min-width: 0;
 }
 
 .session-list button:hover {
@@ -1549,7 +1579,7 @@ body.theme-light .text-danger {
   }
 }
 
-@media (min-width: 1025px) {
+@media (min-width: 901px) {
   .app-shell {
     max-width: none;
     padding: 14px 16px 16px;
@@ -1772,7 +1802,7 @@ body.theme-light .text-danger {
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 900px) {
   .app-shell {
     padding: 8px;
     gap: 8px;
@@ -1927,7 +1957,7 @@ body.theme-light .text-danger {
 }
 
 /* Mobile-only "full chat" surface (WeChat-like), scoped by body class. */
-@media (max-width: 1024px) {
+@media (max-width: 900px) {
   body.viewport-mobile {
     overflow: hidden;
     touch-action: manipulation;

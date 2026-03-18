@@ -8,8 +8,7 @@ const APP_BRAND_SUBTITLE_DEFAULT = "AI-Native Control Surface";
 const SESSION_POLL_INTERVAL_MS = 3000;
 const DEFAULT_SESSION_TYPES = ["项目", "需求", "bug修复", "问题拆解"];
 const MOBILE_VIEWS = new Set(["chat", "sessions", "create", "editor"]);
-const MOBILE_WIDTH_QUERY = "(max-width: 1024px)";
-const MOBILE_POINTER_QUERY = "(hover: none) and (pointer: coarse)";
+const MOBILE_WIDTH_QUERY = "(max-width: 900px)";
 
 const state = {
   defaults: null,
@@ -216,9 +215,7 @@ function sessionStatusLabel(status) {
 }
 
 function isMobileViewport() {
-  const widthMatch = window.matchMedia(MOBILE_WIDTH_QUERY).matches;
-  const pointerMatch = window.matchMedia(MOBILE_POINTER_QUERY).matches;
-  return widthMatch || pointerMatch;
+  return window.matchMedia(MOBILE_WIDTH_QUERY).matches;
 }
 
 function scheduleViewportSync() {
@@ -245,15 +242,12 @@ function bindViewportEvents() {
   }
 
   const widthMQL = window.matchMedia(MOBILE_WIDTH_QUERY);
-  const pointerMQL = window.matchMedia(MOBILE_POINTER_QUERY);
   if (typeof widthMQL.addEventListener === "function") {
     widthMQL.addEventListener("change", scheduleViewportSync);
-    pointerMQL.addEventListener("change", scheduleViewportSync);
     return;
   }
   if (typeof widthMQL.addListener === "function") {
     widthMQL.addListener(scheduleViewportSync);
-    pointerMQL.addListener(scheduleViewportSync);
   }
 }
 
@@ -687,9 +681,13 @@ function bindEvents() {
   }
 
   el.adapterSelect.addEventListener("change", async () => {
-    await refreshSessions();
-    await restoreSelectedSession();
     updateSettingsContext();
+    try {
+      await refreshSessions();
+      await restoreSelectedSession();
+    } finally {
+      updateSettingsContext();
+    }
   });
 
   el.reloadSessions.addEventListener("click", async () => {
@@ -1065,6 +1063,7 @@ function switchSettingsTab(tabName) {
 
 function updateSettingsContext() {
   const adapter = currentAdapter();
+  syncAdapterLayoutMode(adapter);
   if (el.settingsSelectedAdapter) {
     el.settingsSelectedAdapter.textContent = `adapter: ${adapter || "-"}`;
   }
@@ -1082,6 +1081,12 @@ function updateSettingsContext() {
   }
   updateSettingsStreamContext();
   updateMobileBrand();
+}
+
+function syncAdapterLayoutMode(adapterName) {
+  const adapter = String(adapterName || "").trim().toLowerCase();
+  const isPico = adapter === "picoclaw";
+  document.body.classList.toggle("adapter-picoclaw", isPico);
 }
 
 function updateSettingsStreamContext() {

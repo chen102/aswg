@@ -648,7 +648,7 @@ func (s *Server) handleWSRoutes(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				return
 			}
-			if done, _ := ev.Normalized["done"].(bool); done {
+			if shouldEmitDoneFrame(ev) {
 				if err := conn.WriteJSON(wsFrame{FrameType: "done", RequestID: requestID, Seq: ev.Seq, Ts: time.Now().UTC(), Data: map[string]any{"session_id": sessionID}}); err != nil {
 					return
 				}
@@ -839,6 +839,26 @@ func splitPath(path string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+func shouldEmitDoneFrame(ev model.SessionEvent) bool {
+	if !strings.EqualFold(strings.TrimSpace(ev.Type), "message.done") {
+		return false
+	}
+	if ev.Normalized == nil {
+		return false
+	}
+	done, _ := ev.Normalized["done"].(bool)
+	if !done {
+		return false
+	}
+	role, _ := ev.Normalized["role"].(string)
+	role = strings.TrimSpace(role)
+	// Keep compatibility with legacy adapters that may omit role in done events.
+	if role == "" {
+		return true
+	}
+	return strings.EqualFold(role, "assistant")
 }
 
 func (s *Server) withRequestID(next http.Handler) http.Handler {

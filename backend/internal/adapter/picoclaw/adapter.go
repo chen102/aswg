@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -37,6 +38,10 @@ const (
 	defaultRunTimeout  = 120 * time.Second
 	defaultReadIdle    = 45 * time.Second
 	defaultMaxWatchers = 64
+	liveDoneDedupeTTL  = 12 * time.Second
+	chenxiSessionID    = "chenxi-gf"
+	hiddenSessionPref  = "__aswg_hidden_"
+	chenxiRecorderSID  = "__aswg_hidden_chenxi_recorder__"
 )
 
 const (
@@ -50,15 +55,20 @@ const (
 )
 
 type runtimeOptions struct {
-	wsBaseURL       string
-	token           string
-	allowTokenQuery bool
-	dialTimeout     time.Duration
-	runTimeout      time.Duration
-	readIdleTimeout time.Duration
-	historyEnabled  bool
-	historyDir      string
-	maxLiveWatchers int
+	wsBaseURL        string
+	token            string
+	allowTokenQuery  bool
+	dialTimeout      time.Duration
+	runTimeout       time.Duration
+	readIdleTimeout  time.Duration
+	historyEnabled   bool
+	historyDir       string
+	maxLiveWatchers  int
+	autoStartGateway bool
+	gatewayBin       string
+	gatewayLogPath   string
+	gatewayPIDPath   string
+	gatewayStartWait time.Duration
 }
 
 type picoMessage struct {
@@ -70,12 +80,14 @@ type picoMessage struct {
 }
 
 type sessionState struct {
-	detail      model.SessionDetail
-	events      []model.SessionEvent
-	nextSeq     int64
-	subscribers map[int]*subscriber
-	nextSubID   int
-	activeRuns  int
+	detail            model.SessionDetail
+	events            []model.SessionEvent
+	nextSeq           int64
+	subscribers       map[int]*subscriber
+	nextSubID         int
+	activeRuns        int
+	suppressLiveUntil time.Time
+	liveDoneSeen      map[string]time.Time
 }
 
 type subscriber struct {
@@ -98,16 +110,23 @@ type Adapter struct {
 	watchCtx        context.Context
 	watchCancel     context.CancelFunc
 
-	wsBaseURL       string
-	token           string
-	allowTokenQuery bool
-	dialTimeout     time.Duration
-	runTimeout      time.Duration
-	readIdleTimeout time.Duration
-	historyEnabled  bool
-	historyDir      string
-	maxLiveWatchers int
-	eventObserver   func(model.SessionEvent)
+	wsBaseURL        string
+	token            string
+	allowTokenQuery  bool
+	dialTimeout      time.Duration
+	runTimeout       time.Duration
+	readIdleTimeout  time.Duration
+	historyEnabled   bool
+	historyDir       string
+	maxLiveWatchers  int
+	eventObserver    func(model.SessionEvent)
+	autoStartGateway bool
+	gatewayBin       string
+	gatewayLogPath   string
+	gatewayPIDPath   string
+	gatewayStartWait time.Duration
+	gatewayMu        sync.Mutex
+	lastGatewayStart time.Time
 }
 
 var _ adapter.AgentAdapter = (*Adapter)(nil)
@@ -123,21 +142,26 @@ func NewAdapter() (*Adapter, error) {
 
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	return &Adapter{
-		sessions:        make(map[string]*sessionState),
-		deletedSessions: make(map[string]struct{}),
-		idempotency:     make(map[string]idempotencyRecord),
-		liveWatchers:    make(map[string]context.CancelFunc),
-		watchCtx:        watchCtx,
-		watchCancel:     watchCancel,
-		wsBaseURL:       opts.wsBaseURL,
-		token:           opts.token,
-		allowTokenQuery: opts.allowTokenQuery,
-		dialTimeout:     opts.dialTimeout,
-		runTimeout:      opts.runTimeout,
-		readIdleTimeout: opts.readIdleTimeout,
-		historyEnabled:  opts.historyEnabled,
-		historyDir:      opts.historyDir,
-		maxLiveWatchers: opts.maxLiveWatchers,
+		sessions:         make(map[string]*sessionState),
+		deletedSessions:  make(map[string]struct{}),
+		idempotency:      make(map[string]idempotencyRecord),
+		liveWatchers:     make(map[string]context.CancelFunc),
+		watchCtx:         watchCtx,
+		watchCancel:      watchCancel,
+		wsBaseURL:        opts.wsBaseURL,
+		token:            opts.token,
+		allowTokenQuery:  opts.allowTokenQuery,
+		dialTimeout:      opts.dialTimeout,
+		runTimeout:       opts.runTimeout,
+		readIdleTimeout:  opts.readIdleTimeout,
+		historyEnabled:   opts.historyEnabled,
+		historyDir:       opts.historyDir,
+		maxLiveWatchers:  opts.maxLiveWatchers,
+		autoStartGateway: opts.autoStartGateway,
+		gatewayBin:       opts.gatewayBin,
+		gatewayLogPath:   opts.gatewayLogPath,
+		gatewayPIDPath:   opts.gatewayPIDPath,
+		gatewayStartWait: opts.gatewayStartWait,
 	}, nil
 }
 
@@ -202,9 +226,10 @@ func (a *Adapter) CreateSession(ctx context.Context, req model.CreateSessionInpu
 				"ws_base_url": a.wsBaseURL,
 			},
 		},
-		events:      make([]model.SessionEvent, 0, 8),
-		nextSeq:     1,
-		subscribers: make(map[int]*subscriber),
+		events:       make([]model.SessionEvent, 0, 8),
+		nextSeq:      1,
+		subscribers:  make(map[int]*subscriber),
+		liveDoneSeen: make(map[string]time.Time),
 	}
 
 	a.mu.Lock()
@@ -456,10 +481,157 @@ func (a *Adapter) ContinueSession(ctx context.Context, req model.ContinueInput) 
 
 	go func() {
 		defer a.finishSessionRun(sessionID)
+		if shouldRunChenxiRecorder(sessionID) {
+			// Best-effort hidden recorder: trigger a Notion logging decision task for
+			// every chenxi user turn without exposing tool chatter to the user.
+			_ = a.runChenxiRecorder(prompt)
+		}
 		a.emitContinueEvents(ctx, sessionID, prompt)
 	}()
 
 	return job, nil
+}
+
+func shouldRunChenxiRecorder(sessionID string) bool {
+	return strings.EqualFold(strings.TrimSpace(sessionID), chenxiSessionID)
+}
+
+func isHiddenSessionID(sessionID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(sessionID), hiddenSessionPref)
+}
+
+func (a *Adapter) runChenxiRecorder(userPrompt string) error {
+	userPrompt = strings.TrimSpace(userPrompt)
+	if userPrompt == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return a.streamPicoRecorderTask(ctx, chenxiRecorderSID, buildChenxiRecorderPrompt(userPrompt))
+}
+
+func buildChenxiRecorderPrompt(userPrompt string) string {
+	return fmt.Sprintf(`[CHENXI_HIDDEN_NOTION_RECORDER]
+你是“陈曦会话”的后台记录器，这不是对用户展示的回复。
+
+目标：
+1) 对本轮用户消息先做“是否需要记录行为记录”的判定；
+2) 若需要，调用 Notion MCP 工具写入“行为记录”（优先复用已有目标；找不到先 search/fetch）；
+3) 若不需要，跳过写入。
+
+硬要求：
+- 优先判定信息增量：新行为、新情绪状态、计划变化、显著状态变化。
+- 强触发：行为语句（例如“我在...”、“喝口水”、“刚吃完”、“准备睡了”、“在路上了”）默认需要记录。
+- 去重：短时间同语义不重复写；有新细节再追加。
+- 不要输出对用户的话，不要解释工具过程。
+- 最终仅输出一个标记：RECORDED 或 SKIPPED 或 RETRY_LATER。
+
+本轮用户原话：
+%q
+`, userPrompt)
+}
+
+func (a *Adapter) streamPicoRecorderTask(ctx context.Context, sessionID, prompt string) error {
+	conn, err := a.dialSessionWS(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	conn.SetReadLimit(8 << 20)
+	if a.readIdleTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+		conn.SetPongHandler(func(appData string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+			return nil
+		})
+		conn.SetPingHandler(func(appData string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(a.readIdleTimeout))
+			deadline := time.Now().Add(5 * time.Second)
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), deadline)
+		})
+	}
+
+	req := picoMessage{
+		Type:      picoTypeMessageSend,
+		ID:        fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		SessionID: sessionID,
+		Timestamp: time.Now().UnixMilli(),
+		Payload: map[string]any{
+			"content": prompt,
+		},
+	}
+	if err := conn.WriteJSON(req); err != nil {
+		return fmt.Errorf("write pico recorder message.send failed: %w", err)
+	}
+
+	typingStopped := false
+	assistantSeen := false
+	var typingStopDeadline time.Time
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		readWait := a.readIdleTimeout
+		if typingStopped {
+			remaining := time.Until(typingStopDeadline)
+			if remaining <= 0 {
+				return nil
+			}
+			if readWait <= 0 || remaining < readWait {
+				readWait = remaining
+			}
+		}
+		if readWait > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(readWait))
+		}
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				if typingStopped {
+					return nil
+				}
+				return fmt.Errorf("pico recorder read timeout: %w", err)
+			}
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return nil
+			}
+			return fmt.Errorf("read pico recorder stream failed: %w", err)
+		}
+
+		var msg picoMessage
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		if !messageBelongsToSession(msg, sessionID) {
+			continue
+		}
+
+		switch strings.ToLower(strings.TrimSpace(msg.Type)) {
+		case picoTypeMessageCreate, picoTypeMessageUpdate:
+			if extractPicoText(msg.Payload) != "" {
+				assistantSeen = true
+			}
+			if typingStopped && assistantSeen {
+				return nil
+			}
+		case picoTypeTypingStop:
+			typingStopped = true
+			typingStopDeadline = time.Now().Add(2 * time.Second)
+			if assistantSeen {
+				return nil
+			}
+		case picoTypeError:
+			return fmt.Errorf("pico recorder error: %s", extractPicoError(msg.Payload))
+		case picoTypeTypingStart, picoTypePong:
+			continue
+		default:
+			continue
+		}
+	}
 }
 
 func (a *Adapter) Subscribe(ctx context.Context, sessionID string, fromSeq int64) (<-chan model.SessionEvent, func(), error) {
@@ -756,7 +928,22 @@ func (a *Adapter) dialSessionWS(ctx context.Context, sessionID string) (*websock
 		HandshakeTimeout: a.dialTimeout,
 		Proxy:            http.ProxyFromEnvironment,
 	}
-	conn, resp, err := dialer.DialContext(ctx, u, headers)
+	dialOnce := func() (*websocket.Conn, *http.Response, error) {
+		return dialer.DialContext(ctx, u, headers)
+	}
+	conn, resp, err := dialOnce()
+	if err != nil {
+		if a.autoStartGateway && shouldAttemptGatewayAutostart(a.wsBaseURL, err) {
+			if startErr := a.ensureGatewayRunning(ctx); startErr == nil {
+				conn, resp, err = dialOnce()
+			} else {
+				if resp != nil {
+					return nil, fmt.Errorf("dial pico ws failed: status=%d: %w (autostart failed: %v)", resp.StatusCode, err, startErr)
+				}
+				return nil, fmt.Errorf("dial pico ws failed: %w (autostart failed: %v)", err, startErr)
+			}
+		}
+	}
 	if err != nil {
 		if resp != nil {
 			return nil, fmt.Errorf("dial pico ws failed: status=%d: %w", resp.StatusCode, err)
@@ -764,6 +951,180 @@ func (a *Adapter) dialSessionWS(ctx context.Context, sessionID string) (*websock
 		return nil, fmt.Errorf("dial pico ws failed: %w", err)
 	}
 	return conn, nil
+}
+
+func shouldAttemptGatewayAutostart(wsBaseURL string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if !isLocalWSBaseURL(wsBaseURL) {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "connection refused")
+}
+
+func isLocalWSBaseURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	switch host {
+	case "127.0.0.1", "localhost", "::1", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
+}
+
+func wsBaseTCPAddr(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("invalid ws base url: host is required")
+	}
+	if host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	port := strings.TrimSpace(u.Port())
+	if port == "" {
+		switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+		case "ws", "http", "":
+			port = "80"
+		case "wss", "https":
+			port = "443"
+		default:
+			return "", fmt.Errorf("unsupported ws base scheme %q", u.Scheme)
+		}
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+func isTCPReachable(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func (a *Adapter) ensureGatewayRunning(ctx context.Context) error {
+	if !a.autoStartGateway {
+		return fmt.Errorf("gateway autostart disabled")
+	}
+	addr, err := wsBaseTCPAddr(a.wsBaseURL)
+	if err != nil {
+		return err
+	}
+	if isTCPReachable(addr, 250*time.Millisecond) {
+		return nil
+	}
+
+	shouldStart := false
+	a.gatewayMu.Lock()
+	if time.Since(a.lastGatewayStart) >= 2*time.Second {
+		a.lastGatewayStart = time.Now()
+		shouldStart = true
+	}
+	a.gatewayMu.Unlock()
+
+	if shouldStart {
+		if err := a.startGatewayProcess(); err != nil {
+			return err
+		}
+	}
+
+	waitFor := a.gatewayStartWait
+	if waitFor <= 0 {
+		waitFor = 5 * time.Second
+	}
+	deadline := time.Now().Add(waitFor)
+	for {
+		if isTCPReachable(addr, 250*time.Millisecond) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gateway not listening on %s", addr)
+		}
+		if !sleepWithContext(ctx, 150*time.Millisecond) {
+			return ctx.Err()
+		}
+	}
+}
+
+func (a *Adapter) startGatewayProcess() error {
+	bin, err := resolveGatewayBinary(a.gatewayBin)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, "gateway")
+	cmd.Env = os.Environ()
+
+	var logFile *os.File
+	if path := strings.TrimSpace(a.gatewayLogPath); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+			if f, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); openErr == nil {
+				logFile = f
+				cmd.Stdout = f
+				cmd.Stderr = f
+			}
+		}
+	}
+
+	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		return fmt.Errorf("start picoclaw gateway failed: %w", err)
+	}
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+	_ = cmd.Process.Release()
+
+	if path := strings.TrimSpace(a.gatewayPIDPath); path != "" {
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	}
+	return nil
+}
+
+func resolveGatewayBinary(preferred string) (string, error) {
+	candidates := []string{
+		strings.TrimSpace(preferred),
+		strings.TrimSpace(os.Getenv("PICOCLAW_BIN")),
+		"picoclaw",
+		"/tmp/picoclaw",
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, item := range candidates {
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		if strings.ContainsRune(item, os.PathSeparator) {
+			info, err := os.Stat(item)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if info.Mode()&0o111 == 0 {
+				continue
+			}
+			return item, nil
+		}
+		if resolved, err := exec.LookPath(item); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("picoclaw gateway binary not found (set PICOCLAW_GATEWAY_BIN or PICOCLAW_BIN)")
 }
 
 func buildSessionWSURL(base, sessionID, token string, allowTokenQuery bool) (string, error) {
@@ -1052,7 +1413,7 @@ func (a *Adapter) liveWatchReadLoop(ctx context.Context, sessionID string, conn 
 	defer func() {
 		// If upstream connection drops before typing.stop arrives, avoid leaving
 		// passive sessions stuck in running state.
-		if typing && !a.sessionHasActiveRun(sessionID) {
+		if typing && !a.sessionShouldSuppressLive(sessionID) {
 			a.setSessionStatus(sessionID, sessionStatusIdle)
 		}
 	}()
@@ -1085,7 +1446,7 @@ func (a *Adapter) liveWatchReadLoop(ctx context.Context, sessionID string, conn 
 }
 
 func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache map[string]string, msg picoMessage) {
-	if a.sessionHasActiveRun(sessionID) {
+	if a.sessionShouldSuppressLive(sessionID) {
 		return
 	}
 
@@ -1131,6 +1492,9 @@ func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache
 			}
 			messageCache[msgID] = text
 		}
+		if a.isDuplicateLiveDone(sessionID, msgID, text) {
+			return
+		}
 		a.appendAssistantDone(sessionID, text, map[string]any{
 			"raw_type":   msg.Type,
 			"source":     defaultSource,
@@ -1165,6 +1529,22 @@ func (a *Adapter) sessionHasActiveRun(sessionID string) bool {
 	return state.activeRuns > 0
 }
 
+func (a *Adapter) sessionShouldSuppressLive(sessionID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	if state.activeRuns > 0 {
+		return true
+	}
+	if !state.suppressLiveUntil.IsZero() && time.Now().Before(state.suppressLiveUntil) {
+		return true
+	}
+	return false
+}
+
 func (a *Adapter) finishSessionRun(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1176,9 +1556,53 @@ func (a *Adapter) finishSessionRun(sessionID string) {
 		state.activeRuns--
 	}
 	if state.activeRuns == 0 {
+		state.suppressLiveUntil = time.Now().Add(3 * time.Second)
 		state.detail.Status = sessionStatusIdle
 		state.detail.UpdatedAt = time.Now().UTC()
 	}
+}
+
+func (a *Adapter) isDuplicateLiveDone(sessionID, msgID, text string) bool {
+	key := buildLiveDoneKey(msgID, text)
+	if key == "" {
+		return false
+	}
+	now := time.Now().UTC()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state, ok := a.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	if state.liveDoneSeen == nil {
+		state.liveDoneSeen = make(map[string]time.Time)
+	}
+	for k, at := range state.liveDoneSeen {
+		if now.Sub(at) > liveDoneDedupeTTL {
+			delete(state.liveDoneSeen, k)
+		}
+	}
+	if at, exists := state.liveDoneSeen[key]; exists && now.Sub(at) <= liveDoneDedupeTTL {
+		return true
+	}
+	state.liveDoneSeen[key] = now
+	return false
+}
+
+func buildLiveDoneKey(msgID, text string) string {
+	msgID = strings.TrimSpace(msgID)
+	if msgID != "" {
+		return "mid:" + msgID
+	}
+	text = strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) > 200 {
+		text = string(runes[:200])
+	}
+	return "txt:" + text
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
@@ -1492,9 +1916,10 @@ func (a *Adapter) syncHistorySessions() {
 					"history_imported": true,
 				},
 			},
-			events:      cloneSessionEvents(snap.events),
-			nextSeq:     int64(len(snap.events) + 1),
-			subscribers: make(map[int]*subscriber),
+			events:       cloneSessionEvents(snap.events),
+			nextSeq:      int64(len(snap.events) + 1),
+			subscribers:  make(map[int]*subscriber),
+			liveDoneSeen: make(map[string]time.Time),
 		}
 	}
 }
@@ -1512,6 +1937,9 @@ func parseHistorySnapshot(path string) (historySnapshot, bool) {
 
 	sessionID := extractSessionIDFromHistoryKey(src.Key)
 	if sessionID == "" {
+		return historySnapshot{}, false
+	}
+	if isHiddenSessionID(sessionID) {
 		return historySnapshot{}, false
 	}
 
@@ -1707,12 +2135,16 @@ func cloneSessionEvents(items []model.SessionEvent) []model.SessionEvent {
 
 func loadRuntimeOptions() (runtimeOptions, error) {
 	opts := runtimeOptions{
-		dialTimeout:     defaultDialTimeout,
-		runTimeout:      defaultRunTimeout,
-		readIdleTimeout: defaultReadIdle,
-		allowTokenQuery: parseBoolEnv("PICOCLAW_ALLOW_TOKEN_QUERY", false),
-		historyEnabled:  parseBoolEnv("PICOCLAW_HISTORY_ENABLED", true),
-		maxLiveWatchers: defaultMaxWatchers,
+		dialTimeout:      defaultDialTimeout,
+		runTimeout:       defaultRunTimeout,
+		readIdleTimeout:  defaultReadIdle,
+		allowTokenQuery:  parseBoolEnv("PICOCLAW_ALLOW_TOKEN_QUERY", false),
+		historyEnabled:   parseBoolEnv("PICOCLAW_HISTORY_ENABLED", true),
+		maxLiveWatchers:  defaultMaxWatchers,
+		autoStartGateway: parseBoolEnv("PICOCLAW_GATEWAY_AUTOSTART", true),
+		gatewayLogPath:   expandHomePath("~/.picoclaw/workspace/logs/gateway.log"),
+		gatewayPIDPath:   expandHomePath("~/.picoclaw/workspace/logs/gateway.pid"),
+		gatewayStartWait: 5 * time.Second,
 	}
 
 	rawBase := strings.TrimSpace(os.Getenv("PICOCLAW_WS_BASE_URL"))
@@ -1742,6 +2174,19 @@ func loadRuntimeOptions() (runtimeOptions, error) {
 	opts.historyDir = expandHomePath(rawHistoryDir)
 	if n := parsePositiveInt("PICOCLAW_MAX_LIVE_WATCHERS"); n > 0 {
 		opts.maxLiveWatchers = n
+	}
+	opts.gatewayBin = strings.TrimSpace(os.Getenv("PICOCLAW_GATEWAY_BIN"))
+	if opts.gatewayBin == "" {
+		opts.gatewayBin = strings.TrimSpace(os.Getenv("PICOCLAW_BIN"))
+	}
+	if path := strings.TrimSpace(os.Getenv("PICOCLAW_GATEWAY_LOG_PATH")); path != "" {
+		opts.gatewayLogPath = expandHomePath(path)
+	}
+	if path := strings.TrimSpace(os.Getenv("PICOCLAW_GATEWAY_PID_PATH")); path != "" {
+		opts.gatewayPIDPath = expandHomePath(path)
+	}
+	if ms := parsePositiveMS("PICOCLAW_GATEWAY_START_TIMEOUT_MS"); ms > 0 {
+		opts.gatewayStartWait = ms
 	}
 
 	return opts, nil

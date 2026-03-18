@@ -498,3 +498,122 @@ func TestMessageBelongsToSession(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleLiveMessageDedupesImmediateDoneReplay(t *testing.T) {
+	t.Setenv("PICOCLAW_TOKEN", "test-token")
+	t.Setenv("PICOCLAW_WS_BASE_URL", "ws://127.0.0.1:65535")
+	t.Setenv("PICOCLAW_HISTORY_ENABLED", "false")
+
+	a, err := NewAdapter()
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+	detail, err := a.CreateSession(context.Background(), model.CreateSessionInput{Title: "dedupe-check"})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	typing := false
+	messageCache := map[string]string{}
+	msg := picoMessage{
+		Type:      picoTypeMessageCreate,
+		SessionID: detail.ID,
+		Payload: map[string]any{
+			"content": "same text",
+		},
+	}
+	a.handleLiveMessage(detail.ID, &typing, messageCache, msg)
+	a.handleLiveMessage(detail.ID, &typing, messageCache, msg)
+
+	events, err := a.GetSessionEvents(context.Background(), model.EventsRequest{
+		SessionID: detail.ID,
+		Limit:     50,
+	})
+	if err != nil {
+		t.Fatalf("GetSessionEvents() error = %v", err)
+	}
+	doneCount := 0
+	for _, ev := range events.Items {
+		if ev.Type != "message.done" {
+			continue
+		}
+		text, _ := ev.Normalized["text"].(string)
+		if text == "same text" {
+			doneCount++
+		}
+	}
+	if doneCount != 1 {
+		t.Fatalf("expected 1 deduped message.done, got %d", doneCount)
+	}
+}
+
+func TestFinishSessionRunAddsLiveSuppressWindow(t *testing.T) {
+	t.Setenv("PICOCLAW_TOKEN", "test-token")
+	t.Setenv("PICOCLAW_WS_BASE_URL", "ws://127.0.0.1:65535")
+	t.Setenv("PICOCLAW_HISTORY_ENABLED", "false")
+
+	a, err := NewAdapter()
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+	detail, err := a.CreateSession(context.Background(), model.CreateSessionInput{Title: "suppress-check"})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	a.mu.Lock()
+	if s, ok := a.sessions[detail.ID]; ok {
+		s.activeRuns = 1
+	}
+	a.mu.Unlock()
+
+	a.finishSessionRun(detail.ID)
+	if !a.sessionShouldSuppressLive(detail.ID) {
+		t.Fatalf("expected live suppression window right after finishSessionRun")
+	}
+}
+
+func TestShouldAttemptGatewayAutostart(t *testing.T) {
+	if !shouldAttemptGatewayAutostart("ws://127.0.0.1:18790", errors.New("dial tcp 127.0.0.1:18790: connect: connection refused")) {
+		t.Fatalf("expected autostart on local connection refused")
+	}
+	if shouldAttemptGatewayAutostart("ws://10.0.0.2:18790", errors.New("dial tcp 10.0.0.2:18790: connect: connection refused")) {
+		t.Fatalf("did not expect autostart on non-local ws base")
+	}
+	if shouldAttemptGatewayAutostart("ws://127.0.0.1:18790", errors.New("remote handshake failed")) {
+		t.Fatalf("did not expect autostart for non-refused errors")
+	}
+}
+
+func TestWSBaseTCPAddr(t *testing.T) {
+	got, err := wsBaseTCPAddr("ws://127.0.0.1:18790")
+	if err != nil {
+		t.Fatalf("wsBaseTCPAddr() error = %v", err)
+	}
+	if got != "127.0.0.1:18790" {
+		t.Fatalf("wsBaseTCPAddr() = %q, want %q", got, "127.0.0.1:18790")
+	}
+
+	got, err = wsBaseTCPAddr("ws://0.0.0.0:18790")
+	if err != nil {
+		t.Fatalf("wsBaseTCPAddr() error = %v", err)
+	}
+	if got != "127.0.0.1:18790" {
+		t.Fatalf("wsBaseTCPAddr() with wildcard host = %q, want %q", got, "127.0.0.1:18790")
+	}
+}
+
+func TestResolveGatewayBinaryWithAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "picoclaw")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary error = %v", err)
+	}
+	got, err := resolveGatewayBinary(bin)
+	if err != nil {
+		t.Fatalf("resolveGatewayBinary() error = %v", err)
+	}
+	if got != bin {
+		t.Fatalf("resolveGatewayBinary() = %q, want %q", got, bin)
+	}
+}
