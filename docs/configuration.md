@@ -36,6 +36,11 @@
 25. `PUSH_WEBHOOK_TIMEOUT_MS`：推送 HTTP 超时（默认 `3000`）
 26. `PUSH_QUEUE_SIZE`：推送队列长度（默认 `512`）
 27. `PUSH_DEDUPE_TTL_MS`：重复推送去重窗口（默认 `1800000`）
+28. `WEBPUSH_VAPID_PUBLIC_KEY`：内置 Web Push VAPID 公钥（可选）
+29. `WEBPUSH_VAPID_PRIVATE_KEY`：内置 Web Push VAPID 私钥（可选）
+30. `WEBPUSH_VAPID_SUBJECT`：内置 Web Push VAPID Subject（如 `mailto:ops@example.com`）
+31. `WEBPUSH_SUBSCRIPTION_FILE`：内置 Web Push 订阅持久化文件（默认 `.run/webpush-subscriptions.json`）
+32. `WEBPUSH_TTL_SECONDS`：内置 Web Push 通知 TTL（默认 `60`）
 
 ## 3. 前端配置
 前端采用两层配置：
@@ -98,3 +103,8 @@
 26. `PUSH_WEBHOOK_TIMEOUT_MS`：默认 `3000`
 27. `PUSH_QUEUE_SIZE`：默认 `512`
 28. `PUSH_DEDUPE_TTL_MS`：默认 `1800000`
+29. `WEBPUSH_VAPID_PUBLIC_KEY`：默认空（不启用内置 Web Push 发送）
+30. `WEBPUSH_VAPID_PRIVATE_KEY`：默认空
+31. `WEBPUSH_VAPID_SUBJECT`：默认空
+32. `WEBPUSH_SUBSCRIPTION_FILE`：默认 `.run/webpush-subscriptions.json`
+33. `WEBPUSH_TTL_SECONDS`：默认 `60`

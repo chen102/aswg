@@ -2,5 +2,8 @@
   "api_base_url": "http://127.0.0.1:8082",
   "ws_base_url": "ws://127.0.0.1:8082",
   "default_adapter": "codex",
-  "request_timeout_ms": 30000
+  "request_timeout_ms": 30000,
+  "push_subscribe_url": "",
+  "push_unsubscribe_url": "",
+  "push_vapid_public_key": ""
 }

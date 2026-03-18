@@ -31,6 +31,11 @@ PUSH_WEBHOOK_HMAC_SECRET="${PUSH_WEBHOOK_HMAC_SECRET:-}"
 PUSH_WEBHOOK_TIMEOUT_MS="${PUSH_WEBHOOK_TIMEOUT_MS:-3000}"
 PUSH_QUEUE_SIZE="${PUSH_QUEUE_SIZE:-512}"
 PUSH_DEDUPE_TTL_MS="${PUSH_DEDUPE_TTL_MS:-1800000}"
+WEBPUSH_VAPID_PUBLIC_KEY="${WEBPUSH_VAPID_PUBLIC_KEY:-}"
+WEBPUSH_VAPID_PRIVATE_KEY="${WEBPUSH_VAPID_PRIVATE_KEY:-}"
+WEBPUSH_VAPID_SUBJECT="${WEBPUSH_VAPID_SUBJECT:-}"
+WEBPUSH_SUBSCRIPTION_FILE="${WEBPUSH_SUBSCRIPTION_FILE:-.run/webpush-subscriptions.json}"
+WEBPUSH_TTL_SECONDS="${WEBPUSH_TTL_SECONDS:-60}"
 CODEX_STREAM_MODE="real"
 CODEX_MOCK_FALLBACK="false"
 
@@ -66,6 +71,11 @@ Options for up/restart:
   --push-timeout-ms <ms>     PUSH_WEBHOOK_TIMEOUT_MS (default: 3000)
   --push-queue-size <n>      PUSH_QUEUE_SIZE (default: 512)
   --push-dedupe-ttl-ms <ms>  PUSH_DEDUPE_TTL_MS (default: 1800000)
+  --webpush-vapid-public <k> WEBPUSH_VAPID_PUBLIC_KEY
+  --webpush-vapid-private <k> WEBPUSH_VAPID_PRIVATE_KEY
+  --webpush-subject <s>      WEBPUSH_VAPID_SUBJECT (e.g. mailto:ops@example.com)
+  --webpush-sub-file <path>  WEBPUSH_SUBSCRIPTION_FILE (default: .run/webpush-subscriptions.json)
+  --webpush-ttl <sec>        WEBPUSH_TTL_SECONDS (default: 60)
   --no-wait                  Do not wait for health check.
   -h, --help                 Show help.
 
@@ -160,6 +170,31 @@ parse_up_args() {
       --push-dedupe-ttl-ms)
         [[ $# -ge 2 ]] || die "missing value for --push-dedupe-ttl-ms"
         PUSH_DEDUPE_TTL_MS="$2"
+        shift 2
+        ;;
+      --webpush-vapid-public)
+        [[ $# -ge 2 ]] || die "missing value for --webpush-vapid-public"
+        WEBPUSH_VAPID_PUBLIC_KEY="$2"
+        shift 2
+        ;;
+      --webpush-vapid-private)
+        [[ $# -ge 2 ]] || die "missing value for --webpush-vapid-private"
+        WEBPUSH_VAPID_PRIVATE_KEY="$2"
+        shift 2
+        ;;
+      --webpush-subject)
+        [[ $# -ge 2 ]] || die "missing value for --webpush-subject"
+        WEBPUSH_VAPID_SUBJECT="$2"
+        shift 2
+        ;;
+      --webpush-sub-file)
+        [[ $# -ge 2 ]] || die "missing value for --webpush-sub-file"
+        WEBPUSH_SUBSCRIPTION_FILE="$2"
+        shift 2
+        ;;
+      --webpush-ttl)
+        [[ $# -ge 2 ]] || die "missing value for --webpush-ttl"
+        WEBPUSH_TTL_SECONDS="$2"
         shift 2
         ;;
       --no-wait)
@@ -272,6 +307,11 @@ start_server() {
     PUSH_WEBHOOK_TIMEOUT_MS="${PUSH_WEBHOOK_TIMEOUT_MS}" \
     PUSH_QUEUE_SIZE="${PUSH_QUEUE_SIZE}" \
     PUSH_DEDUPE_TTL_MS="${PUSH_DEDUPE_TTL_MS}" \
+    WEBPUSH_VAPID_PUBLIC_KEY="${WEBPUSH_VAPID_PUBLIC_KEY}" \
+    WEBPUSH_VAPID_PRIVATE_KEY="${WEBPUSH_VAPID_PRIVATE_KEY}" \
+    WEBPUSH_VAPID_SUBJECT="${WEBPUSH_VAPID_SUBJECT}" \
+    WEBPUSH_SUBSCRIPTION_FILE="${WEBPUSH_SUBSCRIPTION_FILE}" \
+    WEBPUSH_TTL_SECONDS="${WEBPUSH_TTL_SECONDS}" \
     CODEX_STREAM_MODE="${CODEX_STREAM_MODE}" \
     CODEX_CLI_BIN="${CODEX_CLI_BIN}" \
     CODEX_CLI_ARGS="${CODEX_CLI_ARGS}" \

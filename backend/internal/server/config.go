@@ -24,6 +24,11 @@ type Config struct {
 	PushWebhookTimeout      time.Duration
 	PushQueueSize           int
 	PushDedupeTTL           time.Duration
+	WebPushVAPIDPublicKey   string
+	WebPushVAPIDPrivateKey  string
+	WebPushVAPIDSubject     string
+	WebPushSubscriptionFile string
+	WebPushTTLSeconds       int
 }
 
 func LoadConfig() Config {
@@ -97,6 +102,18 @@ func LoadConfig() Config {
 		}
 	}
 
+	webPushTTLSeconds := 60
+	if raw := strings.TrimSpace(os.Getenv("WEBPUSH_TTL_SECONDS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			webPushTTLSeconds = n
+		}
+	}
+
+	webPushSubscriptionFile := strings.TrimSpace(os.Getenv("WEBPUSH_SUBSCRIPTION_FILE"))
+	if webPushSubscriptionFile == "" {
+		webPushSubscriptionFile = ".run/webpush-subscriptions.json"
+	}
+
 	return Config{
 		Host:                    host,
 		Port:                    port,
@@ -114,6 +131,11 @@ func LoadConfig() Config {
 		PushWebhookTimeout:      pushWebhookTimeout,
 		PushQueueSize:           pushQueueSize,
 		PushDedupeTTL:           pushDedupeTTL,
+		WebPushVAPIDPublicKey:   strings.TrimSpace(os.Getenv("WEBPUSH_VAPID_PUBLIC_KEY")),
+		WebPushVAPIDPrivateKey:  strings.TrimSpace(os.Getenv("WEBPUSH_VAPID_PRIVATE_KEY")),
+		WebPushVAPIDSubject:     strings.TrimSpace(os.Getenv("WEBPUSH_VAPID_SUBJECT")),
+		WebPushSubscriptionFile: webPushSubscriptionFile,
+		WebPushTTLSeconds:       webPushTTLSeconds,
 	}
 }
 

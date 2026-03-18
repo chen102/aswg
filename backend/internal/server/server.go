@@ -51,6 +51,7 @@ type Server struct {
 	sessionLimiter *fixedWindowRateLimiter
 	metaStore      *sessionMetaStore
 	wsPresence     *sessionPresenceTracker
+	pushStore      *webPushSubscriptionStore
 	pushDispatcher *pushDispatcher
 }
 
@@ -90,6 +91,11 @@ func New(cfg Config, registry *adapter.Registry) *Server {
 		log.Printf("load session meta map failed: %v", err)
 		metaStore, _ = newSessionMetaStore("")
 	}
+	pushStore, err := newWebPushSubscriptionStore(cfg.WebPushSubscriptionFile)
+	if err != nil {
+		log.Printf("load web push subscription store failed: %v", err)
+		pushStore = newInMemoryWebPushSubscriptionStore()
+	}
 	srv := &Server{
 		cfg:            cfg,
 		registry:       registry,
@@ -97,7 +103,8 @@ func New(cfg Config, registry *adapter.Registry) *Server {
 		sessionLimiter: newFixedWindowRateLimiter(time.Second),
 		metaStore:      metaStore,
 		wsPresence:     newSessionPresenceTracker(),
-		pushDispatcher: newPushDispatcher(cfg),
+		pushStore:      pushStore,
+		pushDispatcher: newPushDispatcher(cfg, pushStore),
 	}
 	srv.attachAdapterEventObservers()
 	return srv
@@ -130,6 +137,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/adapters", s.handleAdapters)
 	mux.HandleFunc("/api/v1/adapters/", s.handleAdapterRoutes)
+	mux.HandleFunc("/api/v1/push/subscriptions", s.handlePushSubscriptions)
+	mux.HandleFunc("/api/v1/push/subscriptions/remove", s.handlePushSubscriptionRemove)
 	mux.HandleFunc("/ws/v1/adapters/", s.handleWSRoutes)
 	mux.HandleFunc("/", s.handleFrontend)
 	return s.withRequestID(s.withRecover(s.withLogging(mux)))

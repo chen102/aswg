@@ -1049,6 +1049,13 @@ func (a *Adapter) liveWatchReadLoop(ctx context.Context, sessionID string, conn 
 
 	typing := false
 	messageCache := make(map[string]string)
+	defer func() {
+		// If upstream connection drops before typing.stop arrives, avoid leaving
+		// passive sessions stuck in running state.
+		if typing && !a.sessionHasActiveRun(sessionID) {
+			a.setSessionStatus(sessionID, sessionStatusIdle)
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -1084,6 +1091,7 @@ func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache
 
 	switch strings.ToLower(strings.TrimSpace(msg.Type)) {
 	case picoTypeTypingStart:
+		a.setSessionStatus(sessionID, sessionStatusRun)
 		a.appendAssistantAction(sessionID, "正在生成回复", map[string]any{
 			"raw_type": msg.Type,
 			"source":   defaultSource,
@@ -1097,6 +1105,7 @@ func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache
 		}
 		msgID := extractPicoMessageID(msg)
 		if *typing {
+			a.setSessionStatus(sessionID, sessionStatusRun)
 			delta := text
 			if msgID != "" {
 				prev := messageCache[msgID]
@@ -1128,6 +1137,7 @@ func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache
 			"message_id": msgID,
 			"origin":     "live_watch",
 		})
+		a.setSessionStatus(sessionID, sessionStatusIdle)
 	case picoTypeTypingStop:
 		if *typing {
 			a.appendAssistantDone(sessionID, "", map[string]any{
@@ -1137,6 +1147,7 @@ func (a *Adapter) handleLiveMessage(sessionID string, typing *bool, messageCache
 			})
 		}
 		*typing = false
+		a.setSessionStatus(sessionID, sessionStatusIdle)
 	case picoTypePong:
 		return
 	default:

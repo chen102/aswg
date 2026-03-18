@@ -2,8 +2,15 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a1225" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ASWG" />
     <title>Agent Session Web Gateway</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/aswg-icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/aswg-icon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -199,11 +206,32 @@
               <input id="default-adapter" type="text" required placeholder="codex" />
               <small class="field-hint">默认会话适配器名称。</small>
             </label>
+            <label class="settings-field settings-field-wide">
+              <span>push_subscribe_url</span>
+              <input id="push-subscribe-url" type="url" placeholder="https://push.example.com/api/v1/subscriptions" />
+              <small class="field-hint">可选。用于保存 Web Push 订阅信息（建议 HTTPS）。</small>
+            </label>
+            <label class="settings-field settings-field-wide">
+              <span>push_unsubscribe_url</span>
+              <input id="push-unsubscribe-url" type="url" placeholder="https://push.example.com/api/v1/subscriptions/remove" />
+              <small class="field-hint">可选。用于删除 Web Push 订阅信息（建议 HTTPS）。</small>
+            </label>
+            <label class="settings-field settings-field-wide">
+              <span>push_vapid_public_key</span>
+              <input id="push-vapid-public-key" type="text" placeholder="BEl6...（Base64URL）" />
+              <small class="field-hint">可选。若推送服务要求 VAPID，请填写公钥。</small>
+            </label>
           </div>
           <div class="action-row connection-actions">
             <button type="submit" class="btn" data-icon="✓">保存配置</button>
             <button type="button" id="test-connection" class="btn btn-outline" data-icon="◎">连接测试</button>
             <button type="button" id="reset-defaults" class="btn btn-ghost" data-icon="⟲">恢复默认</button>
+          </div>
+          <div class="action-row connection-actions push-actions">
+            <button type="button" id="enable-push" class="btn btn-outline" data-icon="🔔">开启通知</button>
+            <button type="button" id="disable-push" class="btn btn-ghost" data-icon="🔕">关闭通知</button>
+            <button type="button" id="test-local-push" class="btn btn-ghost" data-icon="🧪">测试通知</button>
+            <p id="push-status" class="status-text push-status-line">通知状态: 未初始化</p>
           </div>
         </section>
         <section class="settings-tab-panel" data-settings-panel="session">

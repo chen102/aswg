@@ -374,6 +374,70 @@ func TestSubscribeBridgesLivePicoMessage(t *testing.T) {
 	}
 }
 
+func TestHandleLiveMessageTracksPassiveSessionStatus(t *testing.T) {
+	t.Setenv("PICOCLAW_TOKEN", "test-token")
+	t.Setenv("PICOCLAW_WS_BASE_URL", "ws://127.0.0.1:65535")
+	t.Setenv("PICOCLAW_HISTORY_ENABLED", "false")
+
+	a, err := NewAdapter()
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+	detail, err := a.CreateSession(context.Background(), model.CreateSessionInput{Title: "status-check"})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	typing := false
+	messageCache := map[string]string{}
+
+	a.handleLiveMessage(detail.ID, &typing, messageCache, picoMessage{
+		Type:      picoTypeTypingStart,
+		SessionID: detail.ID,
+	})
+	if !typing {
+		t.Fatalf("expected typing=true after typing.start")
+	}
+	runningDetail, err := a.GetSession(context.Background(), detail.ID)
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if runningDetail.Status != sessionStatusRun {
+		t.Fatalf("expected status=%q after typing.start, got %q", sessionStatusRun, runningDetail.Status)
+	}
+
+	a.handleLiveMessage(detail.ID, &typing, messageCache, picoMessage{
+		Type:      picoTypeMessageCreate,
+		SessionID: detail.ID,
+		Payload: map[string]any{
+			"message_id": "msg-1",
+			"content":    "hello",
+		},
+	})
+	runningDetail, err = a.GetSession(context.Background(), detail.ID)
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if runningDetail.Status != sessionStatusRun {
+		t.Fatalf("expected status=%q while streaming, got %q", sessionStatusRun, runningDetail.Status)
+	}
+
+	a.handleLiveMessage(detail.ID, &typing, messageCache, picoMessage{
+		Type:      picoTypeTypingStop,
+		SessionID: detail.ID,
+	})
+	if typing {
+		t.Fatalf("expected typing=false after typing.stop")
+	}
+	idleDetail, err := a.GetSession(context.Background(), detail.ID)
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if idleDetail.Status != sessionStatusIdle {
+		t.Fatalf("expected status=%q after typing.stop, got %q", sessionStatusIdle, idleDetail.Status)
+	}
+}
+
 func TestMessageBelongsToSession(t *testing.T) {
 	sessionID := "pico_sess_target_001"
 	tests := []struct {

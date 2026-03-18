@@ -1,0 +1,19 @@
+{
+  "name": "Agent Session Web Gateway",
+  "short_name": "ASWG",
+  "description": "Multi-agent session gateway with realtime stream and iOS-ready PWA shell.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a1225",
+  "theme_color": "#0a1225",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/aswg-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

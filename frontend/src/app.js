@@ -1,6 +1,8 @@
 const STORAGE_KEY = "aswg_runtime_config_v1";
 const THEME_STORAGE_KEY = "aswg_theme";
 const SESSION_EDITOR_COLLAPSE_KEY = "aswg_session_editor_collapsed";
+const PUSH_LAST_SUBSCRIPTION_KEY = "aswg_push_subscription_v1";
+const PUSH_SW_PATH = "/sw.js";
 const APP_BRAND_TITLE_DEFAULT = "Agent Session Gateway";
 const APP_BRAND_SUBTITLE_DEFAULT = "AI-Native Control Surface";
 const SESSION_POLL_INTERVAL_MS = 3000;
@@ -34,6 +36,12 @@ const state = {
   mobileView: "chat",
   toolInsightsOpen: false,
   viewportSyncScheduled: false,
+  pushRegistration: null,
+  pushSupported: false,
+  pushBusy: false,
+  pushPermission: "default",
+  pushSubscription: null,
+  launchTarget: null,
 };
 
 const el = {
@@ -63,8 +71,15 @@ const el = {
   apiBaseURL: document.getElementById("api-base-url"),
   wsBaseURL: document.getElementById("ws-base-url"),
   defaultAdapter: document.getElementById("default-adapter"),
+  pushSubscribeURL: document.getElementById("push-subscribe-url"),
+  pushUnsubscribeURL: document.getElementById("push-unsubscribe-url"),
+  pushVapidPublicKey: document.getElementById("push-vapid-public-key"),
   testConnection: document.getElementById("test-connection"),
   resetDefaults: document.getElementById("reset-defaults"),
+  enablePush: document.getElementById("enable-push"),
+  disablePush: document.getElementById("disable-push"),
+  testLocalPush: document.getElementById("test-local-push"),
+  pushStatus: document.getElementById("push-status"),
   adapterSelect: document.getElementById("adapter-select"),
   reloadSessions: document.getElementById("reload-sessions"),
   createSessionForm: document.getElementById("create-session-form"),
@@ -117,7 +132,8 @@ async function bootstrap() {
   const defaults = await loadDefaults();
   const saved = loadSavedConfig();
   state.defaults = defaults;
-  state.config = { ...defaults, ...saved };
+  state.config = resolveRuntimeConfig({ ...defaults, ...saved }, defaults);
+  state.launchTarget = parseLaunchTargetFromURL();
 
   applyConfigToForm(state.config);
   initTheme();
@@ -131,13 +147,64 @@ async function bootstrap() {
   toggleSettingsPanel(false);
   toggleSidebar(false);
   setStreamStatus("WS 未连接", false);
+  await initializePush();
 
   await refreshAdapters();
+  applyLaunchTargetAdapter();
   await refreshSessions();
+  applyLaunchTargetSession();
   await restoreSelectedSession();
+  consumeLaunchTargetQuery();
   ensureSessionPolling();
   updateSettingsContext();
   updateDeleteSessionButtonState();
+}
+
+function parseLaunchTargetFromURL() {
+  const params = new URLSearchParams(String(window.location.search || ""));
+  const adapter = String(params.get("adapter") || "").trim();
+  const sessionID = String(params.get("session_id") || params.get("session") || "").trim();
+  if (!adapter && !sessionID) {
+    return null;
+  }
+  return { adapter, sessionID };
+}
+
+function applyLaunchTargetAdapter() {
+  const targetAdapter = String(state.launchTarget?.adapter || "").trim();
+  if (!targetAdapter || !el.adapterSelect) {
+    return;
+  }
+  const options = Array.from(el.adapterSelect.options || []);
+  if (!options.some((option) => option.value === targetAdapter)) {
+    return;
+  }
+  el.adapterSelect.value = targetAdapter;
+}
+
+function applyLaunchTargetSession() {
+  const sessionID = String(state.launchTarget?.sessionID || "").trim();
+  if (!sessionID) {
+    return;
+  }
+  state.selectedSessionID = sessionID;
+}
+
+function consumeLaunchTargetQuery() {
+  if (!state.launchTarget) {
+    return;
+  }
+  try {
+    const current = new URL(window.location.href);
+    current.searchParams.delete("adapter");
+    current.searchParams.delete("session_id");
+    current.searchParams.delete("session");
+    const next = `${current.pathname}${current.search}${current.hash}`;
+    window.history.replaceState(null, "", next || "/");
+  } catch {
+    // Ignore URL rewrite failures in legacy environments.
+  }
+  state.launchTarget = null;
 }
 
 function normalizeSessionStatus(value) {
@@ -567,6 +634,7 @@ function bindEvents() {
       state.config = next;
       saveConfig(next);
       setSettingsStatus("配置已保存", false);
+      await refreshPushSupport();
       await refreshAdapters();
       await refreshSessions();
       await restoreSelectedSession();
@@ -594,10 +662,29 @@ function bindEvents() {
     saveConfig(state.config);
     applyConfigToForm(state.config);
     setSettingsStatus("已恢复默认配置", false);
+    await refreshPushSupport();
     await refreshAdapters();
     await refreshSessions();
     await restoreSelectedSession();
   });
+
+  if (el.enablePush) {
+    el.enablePush.addEventListener("click", async () => {
+      await enablePushNotifications();
+    });
+  }
+
+  if (el.disablePush) {
+    el.disablePush.addEventListener("click", async () => {
+      await disablePushNotifications();
+    });
+  }
+
+  if (el.testLocalPush) {
+    el.testLocalPush.addEventListener("click", async () => {
+      await sendLocalPushTest();
+    });
+  }
 
   el.adapterSelect.addEventListener("change", async () => {
     await refreshSessions();
@@ -894,6 +981,7 @@ function saveTheme(theme) {
 function applyTheme(theme) {
   const nextTheme = theme === "light" ? "light" : "dark";
   state.theme = nextTheme;
+  document.documentElement.classList.toggle("theme-light", nextTheme === "light");
   document.body.classList.toggle("theme-light", nextTheme === "light");
   if (el.themeToggle) {
     el.themeToggle.textContent = nextTheme === "light" ? "暗色模式" : "亮色模式";
@@ -1004,6 +1092,309 @@ function updateSettingsStreamContext() {
   if (el.settingsStreamAttempts) {
     el.settingsStreamAttempts.textContent = `重连次数: ${Number(state.wsReconnectAttempts || 0)}`;
   }
+}
+
+async function initializePush() {
+  await refreshPushSupport();
+}
+
+async function refreshPushSupport() {
+  state.pushSupported = supportsPush();
+  state.pushPermission = getNotificationPermission();
+
+  if (!state.pushSupported) {
+    state.pushRegistration = null;
+    state.pushSubscription = null;
+    setPushStatus("通知状态: 当前环境不支持 Web Push", true);
+    updatePushActionState();
+    return;
+  }
+
+  try {
+    state.pushRegistration = await navigator.serviceWorker.register(PUSH_SW_PATH, { scope: "/" });
+    await navigator.serviceWorker.ready;
+  } catch (err) {
+    state.pushRegistration = null;
+    state.pushSubscription = null;
+    setPushStatus(`通知状态: Service Worker 注册失败 (${err.message})`, true);
+    updatePushActionState();
+    return;
+  }
+
+  try {
+    await refreshPushSubscriptionState();
+  } catch (err) {
+    state.pushSubscription = null;
+    setPushStatus(`通知状态: 读取订阅失败 (${err.message})`, true);
+    updatePushActionState();
+  }
+}
+
+async function refreshPushSubscriptionState() {
+  if (!state.pushRegistration || !("pushManager" in state.pushRegistration)) {
+    state.pushSubscription = null;
+    setPushStatus("通知状态: PushManager 不可用", true);
+    updatePushActionState();
+    return;
+  }
+  state.pushPermission = getNotificationPermission();
+  state.pushSubscription = await state.pushRegistration.pushManager.getSubscription();
+  if (state.pushSubscription) {
+    saveLastPushSubscription(state.pushSubscription.toJSON());
+    setPushStatus("通知状态: 已订阅", false);
+  } else {
+    setPushStatus("通知状态: 未订阅", false);
+  }
+  updatePushActionState();
+}
+
+async function enablePushNotifications() {
+  if (!state.pushSupported || !state.pushRegistration) {
+    setPushStatus("通知状态: 当前环境不支持 Web Push", true);
+    updatePushActionState();
+    return;
+  }
+  if (isIOSDevice() && !isStandaloneMode()) {
+    setPushStatus("通知状态: iPhone 请先“添加到主屏幕”后再开启通知", true);
+    updatePushActionState();
+    return;
+  }
+
+  state.pushBusy = true;
+  updatePushActionState();
+  try {
+    let permission = getNotificationPermission();
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+    state.pushPermission = permission;
+    if (permission !== "granted") {
+      setPushStatus("通知状态: 未获得通知权限", true);
+      state.pushSubscription = await state.pushRegistration.pushManager.getSubscription();
+      updatePushActionState();
+      return;
+    }
+
+    let subscription = await state.pushRegistration.pushManager.getSubscription();
+    if (!subscription) {
+      const options = { userVisibleOnly: true };
+      const vapidPublicKey = String(state.config?.push_vapid_public_key || "").trim();
+      if (vapidPublicKey) {
+        options.applicationServerKey = base64URLToUint8Array(vapidPublicKey);
+      }
+      subscription = await state.pushRegistration.pushManager.subscribe(options);
+    }
+    state.pushSubscription = subscription;
+    saveLastPushSubscription(subscription.toJSON());
+
+    const synced = await syncPushSubscription("subscribe", subscription.toJSON());
+    if (synced) {
+      setPushStatus("通知状态: 已订阅并同步到推送服务", false);
+    } else {
+      setPushStatus("通知状态: 已订阅（未配置同步接口）", false);
+    }
+  } catch (err) {
+    setPushStatus(`通知状态: 开启失败 (${err.message})`, true);
+  } finally {
+    state.pushBusy = false;
+    updatePushActionState();
+  }
+}
+
+async function disablePushNotifications() {
+  if (!state.pushSupported || !state.pushRegistration) {
+    setPushStatus("通知状态: 当前环境不支持 Web Push", true);
+    updatePushActionState();
+    return;
+  }
+
+  state.pushBusy = true;
+  updatePushActionState();
+  try {
+    const subscription = await state.pushRegistration.pushManager.getSubscription();
+    if (!subscription) {
+      state.pushSubscription = null;
+      saveLastPushSubscription(null);
+      setPushStatus("通知状态: 当前没有可取消的订阅", false);
+      return;
+    }
+
+    const json = subscription.toJSON();
+    const unsubscribed = await subscription.unsubscribe();
+    state.pushSubscription = null;
+    saveLastPushSubscription(null);
+    await syncPushSubscription("unsubscribe", json);
+    if (!unsubscribed) {
+      setPushStatus("通知状态: 订阅已请求取消（浏览器返回未确认）", false);
+      return;
+    }
+    setPushStatus("通知状态: 已取消订阅", false);
+  } catch (err) {
+    setPushStatus(`通知状态: 关闭失败 (${err.message})`, true);
+  } finally {
+    state.pushBusy = false;
+    updatePushActionState();
+  }
+}
+
+async function sendLocalPushTest() {
+  if (!state.pushSupported || !state.pushRegistration) {
+    setPushStatus("通知状态: 当前环境不支持 Web Push", true);
+    updatePushActionState();
+    return;
+  }
+  if (getNotificationPermission() !== "granted") {
+    setPushStatus("通知状态: 请先授予通知权限", true);
+    updatePushActionState();
+    return;
+  }
+
+  state.pushBusy = true;
+  updatePushActionState();
+  try {
+    await state.pushRegistration.showNotification("ASWG 测试通知", {
+      body: "本地通知已触发，可用于验证 iOS 主屏 Web App 展示。",
+      tag: "aswg-local-test",
+      data: { url: window.location.href },
+    });
+    setPushStatus("通知状态: 本地测试通知已发送", false);
+  } catch (err) {
+    setPushStatus(`通知状态: 测试通知失败 (${err.message})`, true);
+  } finally {
+    state.pushBusy = false;
+    updatePushActionState();
+  }
+}
+
+async function syncPushSubscription(action, subscription) {
+  const targetURL = resolvePushSyncURL(action);
+  if (!targetURL) {
+    return false;
+  }
+
+  const timeout = Number(state.config?.request_timeout_ms || 30000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(targetURL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        action,
+        subscription,
+        // Subscribe globally by default to avoid missing notifications when
+        // user switches adapters/sessions on mobile.
+        adapter: "",
+        session_id: "",
+        source: "aswg-web",
+        ts: new Date().toISOString(),
+        user_agent: navigator.userAgent,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return true;
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("同步推送订阅超时");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolvePushSyncURL(action) {
+  const key = action === "unsubscribe" ? "push_unsubscribe_url" : "push_subscribe_url";
+  const explicitURL = trimTrailingSlash(String(state.config?.[key] || "").trim());
+  if (explicitURL) {
+    return explicitURL;
+  }
+  const baseURL = trimTrailingSlash(String(state.config?.api_base_url || "").trim());
+  if (!baseURL) {
+    return "";
+  }
+  if (action === "unsubscribe") {
+    return `${baseURL}/api/v1/push/subscriptions/remove`;
+  }
+  return `${baseURL}/api/v1/push/subscriptions`;
+}
+
+function setPushStatus(text, isError) {
+  if (!el.pushStatus) {
+    return;
+  }
+  el.pushStatus.textContent = text;
+  el.pushStatus.classList.toggle("text-danger", Boolean(isError));
+}
+
+function updatePushActionState() {
+  const supported = state.pushSupported && Boolean(state.pushRegistration);
+  const hasSubscription = Boolean(state.pushSubscription);
+  const granted = state.pushPermission === "granted";
+
+  if (el.enablePush) {
+    el.enablePush.disabled = state.pushBusy || !supported || (granted && hasSubscription);
+  }
+  if (el.disablePush) {
+    el.disablePush.disabled = state.pushBusy || !supported || !hasSubscription;
+  }
+  if (el.testLocalPush) {
+    el.testLocalPush.disabled = state.pushBusy || !supported || !granted;
+  }
+}
+
+function saveLastPushSubscription(subscription) {
+  try {
+    if (!subscription) {
+      localStorage.removeItem(PUSH_LAST_SUBSCRIPTION_KEY);
+      return;
+    }
+    localStorage.setItem(PUSH_LAST_SUBSCRIPTION_KEY, JSON.stringify(subscription));
+  } catch {
+    // Ignore localStorage failures for optional push metadata.
+  }
+}
+
+function supportsPush() {
+  return (
+    typeof window !== "undefined" &&
+    "serviceWorker" in navigator &&
+    "Notification" in window &&
+    "PushManager" in window
+  );
+}
+
+function getNotificationPermission() {
+  if (typeof Notification === "undefined") {
+    return "unsupported";
+  }
+  return Notification.permission || "default";
+}
+
+function isStandaloneMode() {
+  const media = window.matchMedia ? window.matchMedia("(display-mode: standalone)").matches : false;
+  return media || window.navigator.standalone === true;
+}
+
+function isIOSDevice() {
+  return /iphone|ipad|ipod/i.test(String(navigator.userAgent || ""));
+}
+
+function base64URLToUint8Array(base64URL) {
+  let input = String(base64URL || "").trim();
+  const padding = "=".repeat((4 - (input.length % 4)) % 4);
+  input = (input + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(input);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    output[i] = raw.charCodeAt(i);
+  }
+  return output;
 }
 
 function sessionMetaKey(adapter, sessionID) {
@@ -1119,6 +1510,15 @@ function applyConfigToForm(config) {
   el.apiBaseURL.value = config.api_base_url ?? "";
   el.wsBaseURL.value = config.ws_base_url ?? "";
   el.defaultAdapter.value = config.default_adapter ?? "codex";
+  if (el.pushSubscribeURL) {
+    el.pushSubscribeURL.value = config.push_subscribe_url ?? "";
+  }
+  if (el.pushUnsubscribeURL) {
+    el.pushUnsubscribeURL.value = config.push_unsubscribe_url ?? "";
+  }
+  if (el.pushVapidPublicKey) {
+    el.pushVapidPublicKey.value = config.push_vapid_public_key ?? "";
+  }
 }
 
 function readConfigFromForm() {
@@ -1127,6 +1527,9 @@ function readConfigFromForm() {
     ws_base_url: trimTrailingSlash(el.wsBaseURL.value.trim()),
     default_adapter: el.defaultAdapter.value.trim() || "codex",
     request_timeout_ms: Number(state.config?.request_timeout_ms || 30000),
+    push_subscribe_url: trimTrailingSlash(String(el.pushSubscribeURL?.value || "").trim()),
+    push_unsubscribe_url: trimTrailingSlash(String(el.pushUnsubscribeURL?.value || "").trim()),
+    push_vapid_public_key: String(el.pushVapidPublicKey?.value || "").trim(),
   };
 
   if (!isValidHTTPBaseURL(config.api_base_url)) {
@@ -1135,11 +1538,58 @@ function readConfigFromForm() {
   if (!isValidWSBaseURL(config.ws_base_url)) {
     throw new Error("ws_base_url 必须是 ws/wss 地址");
   }
+  if (config.push_subscribe_url && !isValidHTTPBaseURL(config.push_subscribe_url)) {
+    throw new Error("push_subscribe_url 必须是 http/https 地址");
+  }
+  if (config.push_unsubscribe_url && !isValidHTTPBaseURL(config.push_unsubscribe_url)) {
+    throw new Error("push_unsubscribe_url 必须是 http/https 地址");
+  }
+  if (config.push_vapid_public_key && !isLikelyVapidPublicKey(config.push_vapid_public_key)) {
+    throw new Error("push_vapid_public_key 格式不正确（应为 VAPID 公钥）");
+  }
   return config;
 }
 
 function trimTrailingSlash(value) {
   return value.replace(/\/+$/, "");
+}
+
+function resolveRuntimeConfig(config, defaults = {}) {
+  const next = { ...config };
+  const fallback = deriveOriginFallbackConfig();
+
+  if (fallback.apiBaseURL && (!isValidHTTPBaseURL(next.api_base_url) || shouldAutoReplaceLoopback(next.api_base_url))) {
+    next.api_base_url = fallback.apiBaseURL;
+  }
+  if (fallback.wsBaseURL && (!isValidWSBaseURL(next.ws_base_url) || shouldAutoReplaceLoopback(next.ws_base_url))) {
+    next.ws_base_url = fallback.wsBaseURL;
+  }
+  const defaultVapidPublicKey = String(defaults?.push_vapid_public_key || "").trim();
+  if (!isLikelyVapidPublicKey(next.push_vapid_public_key) && isLikelyVapidPublicKey(defaultVapidPublicKey)) {
+    next.push_vapid_public_key = defaultVapidPublicKey;
+  }
+
+  return next;
+}
+
+function deriveOriginFallbackConfig() {
+  const origin = trimTrailingSlash(String(window.location?.origin || ""));
+  if (!isValidHTTPBaseURL(origin)) {
+    return { apiBaseURL: "", wsBaseURL: "" };
+  }
+  return {
+    apiBaseURL: origin,
+    wsBaseURL: origin.replace(/^http/i, "ws"),
+  };
+}
+
+function shouldAutoReplaceLoopback(value) {
+  try {
+    const host = new URL(String(value || "")).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 function isValidHTTPBaseURL(value) {
@@ -1155,6 +1605,23 @@ function isValidWSBaseURL(value) {
   try {
     const u = new URL(value);
     return u.protocol === "ws:" || u.protocol === "wss:";
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyBase64URL(value) {
+  return /^[A-Za-z0-9_-]+$/.test(String(value || "").trim());
+}
+
+function isLikelyVapidPublicKey(value) {
+  const text = String(value || "").trim();
+  if (!isLikelyBase64URL(text)) {
+    return false;
+  }
+  try {
+    const raw = base64URLToUint8Array(text);
+    return raw.length === 65 && raw[0] === 0x04;
   } catch {
     return false;
   }
